@@ -90,8 +90,8 @@ export default function CropProgress({
         {isEmpty || nMasks === 0 ? (
           <span className="text-gray-mid">
             {" "}
-            Genuinely nothing here? Mark the crop empty — a negative sample is
-            worth keeping, a skip is not.
+            Genuinely nothing here? Mark it empty — a negative sample is worth
+            keeping, a skip is not.
           </span>
         ) : null}
       </p>

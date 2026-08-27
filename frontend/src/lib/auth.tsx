@@ -121,9 +121,9 @@ export function RequireAdmin({ children }: { children: ReactNode }) {
         Admin only
       </h1>
       <p className="text-[13px] text-gray-mid mt-2">
-        This page manages accounts, frame deletion, backups and the export.
-        Your account has the poweruser role, which can label crops, upload
-        frames and add classes. An admin can change that for you.
+        This page manages accounts, frame deletion, backup and export. Your
+        poweruser role can label crops, upload frames and add classes; an admin
+        can change it.
       </p>
     </Card>
   );

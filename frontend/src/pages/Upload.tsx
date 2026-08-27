@@ -134,34 +134,32 @@ export default function Upload() {
           Add frames
         </h1>
         <p className="text-sm text-gray-mid mt-2">
-          Drop full-resolution frames here. The server stores each one and splits
-          it into crops straight away — the crops are what you label.
+          Drop full-resolution frames. Each is stored and split into crops — the
+          crops are what you label.
         </p>
       </div>
 
       <Card className="p-5">
         <SectionLabel>Why the frame gets split</SectionLabel>
         <p className="text-[13px] text-gray-mid mt-2">
-          Each frame is tiled into 640-pixel crops, the size YOLO11-seg trains on.
-          That size is not a performance detail: segmentation training treats every
-          unlabeled instance as background, so a half-labeled frame actively teaches
-          the model to ignore real instances. Exhaustively labeling a 4000x3000 frame in
-          one sitting is not realistic; exhaustively labeling one 640-pixel crop is.
-          So the crop is the unit of work, and only crops marked done are exported.
+          Frames are tiled into 640-pixel crops, the size YOLO11-seg trains on.
+          Training treats every unlabeled instance as background, so a
+          half-labeled frame teaches the model to ignore real instances.
+          Exhaustively labeling a 4000x3000 frame is unrealistic; one 640-pixel
+          crop is not. So the crop is the unit of work, and only crops marked
+          done are exported.
         </p>
       </Card>
 
       <Card className="p-5">
         <SectionLabel>Photograph every sheet twice</SectionLabel>
         <p className="text-[13px] text-gray-mid mt-2">
-          Once as it comes out, debris and all. Then clean it
-          and photograph it again, empty, before it goes back in — same sheet,
-          same light, nothing on it.
+          Once as collected, debris and all. Then cleaned and empty, before it
+          goes back in — same sheet, same light.
         </p>
         <p className="text-[13px] text-gray-mid mt-2">
-          The empty one is not a wasted upload. It is the frame where the right
-          answer is nothing at all, and that is something the model has to be
-          shown rather than told. Clean sheets are as welcome here as full ones.
+          The empty one is not wasted: it shows the model that nothing is a valid
+          answer. Clean sheets are as welcome as full ones.
         </p>
       </Card>
 
@@ -259,10 +257,9 @@ export default function Upload() {
           <SectionLabel>Before that sheet goes back in</SectionLabel>
           <p className="text-[13px] text-gray-mid mt-2">
             {added.length === 1
-              ? "That sheet is in. Now clean it and photograph it empty, and upload that one too — "
-              : `Those ${added.length} sheets are in. Now clean them and photograph them empty, and upload those too — `}
-            it is the same job twice and the second half is the half everyone
-            forgets.
+              ? "That sheet is in. Now clean it, photograph it empty, and upload that too — "
+              : `Those ${added.length} sheets are in. Now clean them, photograph them empty, and upload those too — `}
+            the half everyone forgets.
           </p>
         </Card>
       ) : null}

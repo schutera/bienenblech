@@ -201,9 +201,9 @@ export default function Home() {
             Label every instance, one crop at a time
           </h1>
           <p className="text-sm text-gray-mid mt-2">
-            Every uploaded frame is split into 640-pixel crops, and the crop is the
-            unit of work: small enough that labeling every instance in it is
-            realistic, which is what makes the training data honest.
+            Each frame is split into 640-pixel crops. The crop is the unit of
+            work: small enough that labeling every instance is realistic, which
+            keeps the training data honest.
           </p>
         </div>
         <div className="flex flex-col items-start gap-2">
@@ -242,8 +242,8 @@ export default function Home() {
               </div>
               <ProgressBar value={fraction} className="mt-2" />
               <p className="text-[12px] text-gray-tertiary mt-2">
-                Only crops marked done are exported. An open crop is left out
-                entirely rather than shipped half-labeled.
+                Only crops marked done are exported — never a half-labeled open
+                one.
               </p>
             </div>
           </Card>
@@ -263,8 +263,7 @@ export default function Home() {
               </div>
               {classes.length === 0 ? (
                 <p className="text-[13px] text-gray-mid mt-3">
-                  No classes yet. The first one has to exist before a polygon can
-                  be drawn.
+                  No classes yet — a polygon cannot be drawn without one.
                 </p>
               ) : (
                 <ul className="mt-4 flex flex-col gap-2.5">
@@ -303,7 +302,7 @@ export default function Home() {
                 <EmptyState
                   className="mt-4"
                   title="No frames yet"
-                  body="Any signed-in account can upload frames. Upload one and the server tiles it into crops straight away."
+                  body="Any signed-in account can upload; each frame is tiled into crops on arrival."
                   action={<Button onClick={() => navigate("/upload")}>Upload a frame</Button>}
                 />
               ) : (
@@ -381,9 +380,9 @@ export default function Home() {
                               )}
                             </div>
                             <p className="text-[11px] text-gray-tertiary">
-                              The grid mirrors how the frame is tiled. Each tile
-                              shows its polygon count; a dash means the crop was
-                              marked empty. Click any tile to label it.
+                              Tiles mirror the frame's tiling and show polygon
+                              counts; a dash means marked empty. Click a tile to
+                              label it.
                             </p>
                           </div>
                         ) : null}
@@ -413,8 +412,8 @@ export default function Home() {
                 {target.n_done > 0 ? `, including ${target.n_done} finished crop${target.n_done === 1 ? "" : "s"}` : ""}.
               </p>
               <p className="mt-2">
-                This is the only hard delete in the app: masks and classes are
-                archived, an image is not. It cannot be undone.
+                The app's only hard delete — masks and classes are archived,
+                frames are not. No undo.
               </p>
             </>
           ) : null

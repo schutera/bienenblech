@@ -376,7 +376,7 @@ export default function Label() {
         {error ? <ErrorNote className="mb-6" onDismiss={() => setError(null)}>{error}</ErrorNote> : null}
         <EmptyState
           title="No open crops left"
-          body="Every crop of every uploaded frame has been marked done or empty. Upload another frame to keep going, or reopen a crop from its frame's grid on the Overview to revisit it."
+          body="Every crop is marked done or empty. Upload another frame, or reopen a crop from its frame's grid on the Overview."
           action={<Button onClick={() => navigate("/upload")}>Upload a frame</Button>}
         />
       </div>
@@ -453,13 +453,12 @@ export default function Label() {
             />
             {activeClasses.length === 0 ? (
               <p className="text-[12px] text-gray-tertiary mt-3">
-                No classes exist yet. Add the first one right here in the picker
-                above — a polygon cannot be drawn until a class exists to put it
-                in.
+                No classes yet. Add the first in the picker above — a polygon
+                cannot be drawn without one.
               </p>
             ) : (
               <p className="text-[12px] text-gray-tertiary mt-3">
-                With a polygon selected, picking a class re-classes that polygon.
+                With a polygon selected, picking a class re-classes it.
               </p>
             )}
           </Card>
@@ -484,8 +483,7 @@ export default function Label() {
             {readOnly ? (
               <div className="mt-4 flex flex-col gap-2 items-start">
                 <p className="text-[13px] text-gray-mid">
-                  This crop is finished and is being exported. Reopen it to change
-                  anything.
+                  Finished and included in exports. Reopen to change anything.
                 </p>
                 <Button variant="ghost" onClick={() => void reopen()} disabled={busy}>
                   Reopen this crop
@@ -504,8 +502,8 @@ export default function Label() {
                   </Button>
                   <p className="text-[12px] text-gray-tertiary mt-1.5">
                     {masks.length === 0
-                      ? "Needs at least one polygon. If there is genuinely nothing here, use the button below."
-                      : "Press this only once every instance in the crop has a polygon."}
+                      ? "Needs at least one polygon. Genuinely nothing here? Use the button below."
+                      : "Only once every instance in the crop has a polygon."}
                   </p>
                 </div>
                 <div>
@@ -519,14 +517,14 @@ export default function Label() {
                   </Button>
                   <p className="text-[12px] text-gray-tertiary mt-1.5">
                     {masks.length === 0
-                      ? "A crop with no instances is a valid negative example, not a skip. It is exported with an empty label file."
-                      : "Not available: this crop already has polygons. Delete them first if the crop is genuinely empty."}
+                      ? "A crop with no instances is a valid negative example, not a skip — exported with an empty label file."
+                      : "This crop has polygons. Delete them first if it is genuinely empty."}
                   </p>
                 </div>
                 <p className="text-[12px] text-gray-tertiary border-t border-border pt-3">
-                  Not sure? Leave it. There is no skip button because leaving a
-                  crop open is the skip — it stays in the queue and nothing is
-                  exported from it.
+                  Not sure? Leave it. There is no skip button — leaving a crop
+                  open is the skip: it stays in the queue and nothing is exported
+                  from it.
                 </p>
               </div>
             )}

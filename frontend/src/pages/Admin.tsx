@@ -209,8 +209,8 @@ function Users() {
           target ? (
             <p>
               <span className="text-near-black">{target.username}</span> loses access
-              immediately. The polygons they drew stay, credited to their username.
-              The server refuses this if they are the last admin.
+              immediately; their polygons stay, credited to their username. The
+              last admin cannot be deleted.
             </p>
           ) : null
         }
@@ -375,20 +375,17 @@ function Classes() {
       <Card className="p-5">
         <SectionLabel>Archiving keeps the index</SectionLabel>
         <p className="text-[13px] text-gray-mid mt-2">
-          Archiving a class hides it from the labeling screen but keeps everything
-          else: its polygons stay, and its yolo_index stays reserved forever.
-          data.yaml is keyed by that index, archived classes included, so a model
-          trained on an older export keeps matching this one. Indices are never
-          renumbered and never reused. An archive done by mistake is not fatal:
-          the class can be restored here, and its polygons were never touched.
+          Archiving only hides a class from the labeling screen: its polygons
+          stay, and its yolo_index stays reserved forever — never renumbered,
+          never reused — so data.yaml keeps matching older exports. A mistaken
+          archive can be restored here, polygons untouched.
         </p>
         <p className="text-[13px] text-gray-mid mt-2">
-          Any signed-in account can add a class, and the create form lives on the
-          labeling screen where the need appears. Renaming, recoloring, archiving
-          and restoring are admin-only, because those change how every existing
-          polygon of that class is read. The first nine active classes are what
-          the digit keys 1 to 9 select on the labeling screen, so their order
-          here is the order of those shortcuts.
+          Any signed-in account can add a class, on the labeling screen where the
+          need appears. Renaming, recoloring, archiving and restoring are
+          admin-only: they change how every existing polygon of that class is read.
+          On the labeling screen, keys 1 to 9 pick the first nine active classes
+          in this order.
         </p>
       </Card>
 
@@ -404,8 +401,8 @@ function Classes() {
       ) : classes.length === 0 ? (
         <Card className="p-5">
           <p className="text-[13px] text-gray-mid">
-            No classes yet. The first one is added on the labeling screen — a
-            polygon cannot be drawn until one exists.
+            No classes yet. Add the first on the labeling screen — a polygon
+            cannot be drawn without one.
           </p>
         </Card>
       ) : (
@@ -443,12 +440,12 @@ function Classes() {
           target ? (
             <>
               <p>
-                <span className="text-near-black">{target.name}</span> stops being offered
+                <span className="text-near-black">{target.name}</span> is no longer offered
                 on the labeling screen. Its {target.n_masks} polygon
-                {target.n_masks === 1 ? "" : "s"} stay where they are, and yolo_index{" "}
+                {target.n_masks === 1 ? "" : "s"} stay, and yolo_index{" "}
                 {target.yolo_index} stays reserved so old exports keep matching.
               </p>
-              <p className="mt-2">An admin can restore it from this page afterwards.</p>
+              <p className="mt-2">An admin can restore it here later.</p>
             </>
           ) : null
         }
@@ -585,7 +582,7 @@ function ClassRow({
             label="Description"
             value={description}
             onChange={setDescription}
-            hint="Shown on the labeling screen as the definition of this class."
+            hint="Shown on the labeling screen as the class's definition."
           />
           <div className="flex items-center gap-3">
             <Button onClick={() => void save()} disabled={saving || !name.trim()}>
@@ -643,9 +640,9 @@ function Backup() {
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div>
             <p className="text-[13px] text-gray-mid">
-              The backup zips the database, flat CSV exports of the masks, classes
-              and crops, and every stored frame — labels without pixels are worth
-              nothing. It runs on a schedule and can be run by hand here.
+              Zips the database, CSV exports of masks, classes and crops, and
+              every stored frame — labels without pixels are worth nothing. Runs
+              on a schedule, or by hand here.
             </p>
             <div className="flex items-center gap-3 mt-3 flex-wrap text-[13px]">
               <Pill tone={status?.enabled ? "accent" : "warn"}>
@@ -678,7 +675,7 @@ function Backup() {
         {lastResult ? (
           <p className="text-[12px] text-gray-mid mt-3">
             {lastResult.status === "skipped"
-              ? "Skipped: the store was busy, so nothing was written and nothing is wrong."
+              ? "Skipped: the store was busy; nothing was written, nothing is wrong."
               : lastResult.status === "failed"
                 ? `Failed: ${lastResult.error ?? "no detail given"}`
                 : `Wrote ${fmtBytes(lastResult.bytes)} to ${lastResult.zip_path ?? "the backups directory"}.`}
@@ -732,16 +729,16 @@ function Export() {
       <SectionLabel>YOLO-seg export</SectionLabel>
       <Card className="p-5">
         <p className="text-[13px] text-gray-mid">
-          Downloads a zip laid out for YOLO11-seg training: data.yaml, the crop
-          images, and one polygon label file per crop. Only crops marked done are
-          included — an open crop would teach the model that its unlabeled
-          instances are background, so it is left out entirely. A crop marked empty ships with an
-          empty label file, which is a real negative example.
+          A zip laid out for YOLO11-seg training: data.yaml, the crop images, and
+          one polygon label file per crop. Only crops marked done are included —
+          an open crop would teach the model its unlabeled instances are
+          background. A crop marked empty ships an empty label file: a real
+          negative example.
         </p>
         <p className="text-[13px] text-gray-mid mt-2">
-          The train/val split is deterministic and grouped by frame, never by crop:
-          two tiles of the same frame on opposite sides of the split would leak, and
-          the val metric would be a lie. The same seed gives the same split.
+          The train/val split is deterministic and grouped by frame, never by
+          crop — tiles of one frame on both sides would leak and make the val
+          metric a lie.
         </p>
 
         <div className="grid gap-3 sm:grid-cols-2 mt-4 max-w-md">
@@ -773,7 +770,7 @@ function Export() {
             <span className="text-[13px] text-gray-tertiary">
               {nDone > 0
                 ? `${nDone.toLocaleString()} crop${nDone === 1 ? "" : "s"} will be included.`
-                : "No crop has been marked done yet, so there is nothing to export."}
+                : "No crops marked done yet — nothing to export."}
             </span>
           ) : null}
         </div>
