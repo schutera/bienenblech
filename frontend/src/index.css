@@ -75,13 +75,13 @@ body {
 :root { --app-header-h: 73px; }
 
 /* ---- why there is NO dark labeling surface here ----
-   cownting darkens its Label route because its annotator judges how brightly lit
+   cownting darkens its Label route because its labeler judges how brightly lit
    a cow is, and a near-white card wrapped around the photograph biases the exact
    perceptual judgement being asked for. This app asks a different question:
    trace the boundary of every instance. Boundary tracing is a spatial judgement,
    not a photometric one, and the surround does not shift it. Meanwhile this
    screen carries a paragraph of standing instruction (the completeness rule),
-   the class list and two terminal actions in text the annotator re-reads on
+   the class list and two terminal actions in text the labeler re-reads on
    every single crop — all more legible, and consistent with the other five
    routes, on warm paper. So there is no [data-surface="label"] block here and no
    second palette to keep in sync: the app is light throughout, and the canvas

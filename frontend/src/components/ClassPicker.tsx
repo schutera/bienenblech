@@ -8,7 +8,7 @@ import type { LabelClass } from "../lib/types";
  * leaving the labeling screen.
  *
  * The count column is not decoration. SPEC section 1 makes exhaustiveness the
- * invariant — "every instance of every known class" — so the annotator needs to
+ * invariant — "every instance of every known class" — so the labeler needs to
  * see, at the moment of marking a crop done, that the class they were not
  * thinking about still reads zero.
  *
@@ -79,7 +79,7 @@ export default function ClassPicker({
   // Opening the form pre-picks the first unused swatch, so adding a class is
   // "click, type, Enter" and never a colour-picking detour. Chosen on open
   // rather than in an effect: a `classes` refresh mid-typing must not silently
-  // change the colour under the annotator.
+  // change the colour under the labeler.
   function openAdd() {
     setColor(PALETTE.find((c) => !usedColors.has(c)) ?? PALETTE[0]);
     setError(null);

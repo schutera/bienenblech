@@ -206,7 +206,7 @@ def seeded_store(admin_client: TestClient) -> dict[str, Any]:
     coordinate offsets and the completion guards are exactly what production
     writes — the backup's job is to preserve *that*."""
     classes = {}
-    for name in ("Bee", "Mite"):
+    for name in ("Wax", "Mite"):
         r = admin_client.post("/api/classes", json={"name": name})
         assert r.status_code == 200, r.text
         classes[name] = r.json()
@@ -217,9 +217,9 @@ def seeded_store(admin_client: TestClient) -> dict[str, Any]:
     c10 = db.crop_id_for(image_id, 1, 0)
 
     for crop_id, name, points in (
-        (c00, "Bee", [[4, 4], [40, 4], [40, 32]]),
+        (c00, "Wax", [[4, 4], [40, 4], [40, 32]]),
         (c00, "Mite", [[8, 8], [56, 56], [56, 8], [8, 56]]),
-        (c10, "Bee", [[2, 2], [60, 2], [60, 60]]),
+        (c10, "Wax", [[2, 2], [60, 2], [60, 60]]),
     ):
         r = admin_client.post("/api/masks", json={
             "crop_id": crop_id, "class_id": classes[name]["class_id"], "points": points,
@@ -307,8 +307,8 @@ def test_users_table_is_not_in_the_backup_snapshot(seeded_store, cfg, poster, tm
     as the box, and a post cannot be un-posted. scrypt is salted and expensive so
     this is not a catastrophe, but it was never a decision anyone made. The
     resolution is to exclude `users` from the snapshot — accounts are cheap
-    (a restore re-bootstraps the admin from `BIENENBLECH_ADMIN_*` and annotators
-    are recreated by hand), annotations are not.
+    (a restore re-bootstraps the admin from `BIENENBLECH_ADMIN_*` and poweruser
+    accounts are recreated by hand), annotations are not.
 
     The absence check alone is not enough: an empty or half-copied snapshot would
     pass it while quietly destroying the backup. So this also asserts the tables

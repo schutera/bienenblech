@@ -9,7 +9,7 @@ halfway through an implementation.
 **VarroDetector** — <https://github.com/jodivaso/varrodetector>
 (spelling matters: `varrodetector`, one "a" in the middle; `varroadetector` 404s.)
 
-Counts *Varroa destructor* mites in smartphone photographs of beehive sticky
+Counts *Varroa destructor* mites in smartphone photographs of sticky
 sheets — the same physical surface this tool is named after. Runs CPU-only, no
 install, no network.
 
@@ -64,10 +64,10 @@ model, insert suggested masks".
 becomes a 4-vertex rectangle, which is a poor segmentation label. Mites are
 roughly elliptical, so an inscribed 8- or 12-vertex ellipse is a better starting
 polygon than a rectangle — closer to the true silhouette, and less work for the
-annotator to correct than a rectangle that is wrong on all four corners. Either
-way the annotator is refining a suggestion, not accepting a mask.
+labeler to correct than a rectangle that is wrong on all four corners. Either
+way the labeler is refining a suggestion, not accepting a mask.
 
-**The risk to name out loud: automation bias.** Prelabels make annotators
+**The risk to name out loud: automation bias.** Prelabels make labelers
 rubber-stamp. That is a direct threat to the completeness invariant in
 [SPEC.md](SPEC.md) section 1 — the whole reason this tool works on crops. If
 prelabeling ships, it must come with:
@@ -80,7 +80,7 @@ prelabeling ships, it must come with:
   suggestion in it, so "done" keeps meaning a human looked.
 - Retention of the original model output, so agreement between model and human
   is measurable later. That number is the honest answer to "is prelabeling
-  helping or is it just moving the annotator's errors around?"
+  helping or is it just moving the labeler's errors around?"
 
 **Cost.** The runtime image is deliberately torch-free and small (see
 [DEPLOY.md](../DEPLOY.md)). CPU torch + ultralytics adds roughly 1-2 GB. That

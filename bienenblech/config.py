@@ -106,7 +106,7 @@ class BackupCfg(BaseModel):
 
     Enabled by default, unlike cownting's: here the zip carries the *pixels* as
     well as the labels, so a deployment with backups off has no recoverable copy
-    of the annotator hours at all. An unset `BIENENBLECH_DISCORD_WEBHOOK` is a
+    of the labeling hours at all. An unset `BIENENBLECH_DISCORD_WEBHOOK` is a
     fully supported state — it still zips and still rotates locally."""
 
     enabled: bool = True

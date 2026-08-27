@@ -1,4 +1,11 @@
-"""The login gate and the admin/annotator split (SPEC sections 2 and 5).
+"""The login gate and the admin/poweruser split (SPEC sections 2 and 5).
+
+The second role is named 'poweruser'. SPEC section 2 called it 'annotator';
+that is amended (recorded here, because the SPEC is frozen): same two-role
+model, admin unchanged, but powerusers may additionally upload frames. The
+role-rename section near the bottom of this file pins the amendment: the API
+speaks only the new name, refuses the old one loudly, and a store written by
+an older build is migrated at boot.
 
 SPEC section 5: "every route except `/api/health` and `/api/login` requires a
 session". `api.PUBLIC_API` widens that by two — `/api/logout`, which must be
@@ -19,8 +26,10 @@ from __future__ import annotations
 
 import os
 import urllib.request
+from pathlib import Path
 from typing import Any, Callable
 
+import duckdb
 import pytest
 from fastapi.testclient import TestClient
 
@@ -29,8 +38,8 @@ from bienenblech import api
 from conftest import (
     ADMIN_PASSWORD,
     ADMIN_USER,
-    ANNOTATOR_PASSWORD,
-    ANNOTATOR_USER,
+    POWERUSER_PASSWORD,
+    POWERUSER_USER,
     frame_bytes,
 )
 
@@ -109,7 +118,7 @@ def test_login_failure_does_not_leak_whether_the_user_exists(client: TestClient)
 
 def test_session_persists_across_requests(admin: TestClient):
     """The session cookie is the whole auth story; if it did not survive the
-    next request, every annotator would be signed out mid-crop."""
+    next request, every user would be signed out mid-crop."""
     for _ in range(3):
         resp = admin.get("/api/me")
         assert resp.status_code == 200
@@ -134,68 +143,80 @@ def test_login_rotates_the_session(client: TestClient):
 
 
 # ------------------------------------------------------------------ admin gates
-def test_annotator_cannot_list_users(annotator: TestClient):
-    resp = annotator.get("/api/users")
+def test_poweruser_cannot_list_users(poweruser: TestClient):
+    resp = poweruser.get("/api/users")
     assert resp.status_code == 403
     assert resp.json()["detail"] == "admin only"
 
 
-def test_annotator_cannot_create_users(annotator: TestClient):
-    """Otherwise the annotator/admin split is decorative: anyone could mint
+def test_poweruser_cannot_create_users(poweruser: TestClient):
+    """Otherwise the poweruser/admin split is decorative: anyone could mint
     themselves an admin account."""
-    resp = annotator.post(
+    resp = poweruser.post(
         "/api/users", json={"username": "sneaky", "password": "pw", "role": "admin"}
     )
     assert resp.status_code == 403
 
 
-def test_annotator_cannot_delete_users(annotator: TestClient):
-    resp = annotator.delete(f"/api/users/{ADMIN_USER}")
+def test_poweruser_cannot_delete_users(poweruser: TestClient):
+    resp = poweruser.delete(f"/api/users/{ADMIN_USER}")
     assert resp.status_code == 403
 
 
-def test_annotator_cannot_upload_images(annotator: TestClient):
-    """Upload is admin-only (SPEC section 2). An upload creates a whole grid of
-    crops in everyone's queue, so it is a decision about other people's work."""
-    resp = annotator.post(
-        "/api/images", files={"file": ("frame.png", frame_bytes(seed=7), "image/png")}
+def test_poweruser_may_upload_images(poweruser: TestClient):
+    """Upload is open to powerusers — the amendment that motivated the role
+    rename (SPEC section 2 as amended; the SPEC itself is frozen). Every
+    signed-in user is now admin or poweruser, so `POST /api/images` is open to
+    any session, and the whole pipeline behind the route — derivative, tiling,
+    crop rows — must run for them, not just the gate. Deletion stays a decision
+    about other people's work, so it remains admin-only, pinned right below."""
+    resp = poweruser.post(
+        "/api/images",
+        files={"file": ("frame.png", frame_bytes(640, 480, seed=7), "image/png")},
     )
-    assert resp.status_code == 403
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["duplicates"] == []
+    summary = body["images"][0]
+    assert summary["n_crops"] == 1, summary  # 640x480 fits in a single 640px tile
+    crops = poweruser.get(f"/api/images/{summary['image_id']}").json()["crops"]
+    assert len(crops) == 1 and crops[0]["status"] == "open"
 
 
-def test_annotator_cannot_delete_images(annotator: TestClient, image: dict):
+def test_poweruser_cannot_delete_images(poweruser: TestClient, image: dict):
     """The one hard delete in the schema (SPEC section 4). It takes the masks
-    with it, so it stays behind the admin gate."""
-    resp = annotator.delete(f"/api/images/{image['image_id']}?force=true")
+    with it, so it stays behind the admin gate — upload rights do not imply
+    delete rights."""
+    resp = poweruser.delete(f"/api/images/{image['image_id']}?force=true")
     assert resp.status_code == 403
 
 
-def test_annotator_cannot_export(annotator: TestClient):
-    resp = annotator.get("/api/export/yolo")
+def test_poweruser_cannot_export(poweruser: TestClient):
+    resp = poweruser.get("/api/export/yolo")
     assert resp.status_code == 403
 
 
-def test_annotator_cannot_trigger_a_backup(annotator: TestClient):
+def test_poweruser_cannot_trigger_a_backup(poweruser: TestClient):
     """403 has to come from the gate, before `backup.run_backup` is imported or
     a zip is written."""
-    resp = annotator.post("/api/backup/run", json={})
+    resp = poweruser.post("/api/backup/run", json={})
     assert resp.status_code == 403
 
 
-def test_admin_may_list_users(admin: TestClient, annotator: TestClient):
+def test_admin_may_list_users(admin: TestClient, poweruser: TestClient):
     resp = admin.get("/api/users")
     assert resp.status_code == 200
     names = {u["username"] for u in resp.json()}
-    assert names == {ADMIN_USER, ANNOTATOR_USER}
+    assert names == {ADMIN_USER, POWERUSER_USER}
     assert all("password_hash" not in u for u in resp.json()), (
         "GET /api/users must never carry a password hash"
     )
 
 
 # -------------------------------------------------------------------- last admin
-def test_cannot_delete_the_last_admin(admin: TestClient, annotator: TestClient):
+def test_cannot_delete_the_last_admin(admin: TestClient, poweruser: TestClient):
     """An instance with no admin can never be administered again, and there is
-    no shell in the container to fix it from. The annotator in the fixture is
+    no shell in the container to fix it from. The poweruser in the fixture is
     there to prove the check counts admins, not users."""
     resp = admin.delete(f"/api/users/{ADMIN_USER}")
     assert resp.status_code == 400
@@ -224,45 +245,45 @@ def test_deleting_an_unknown_user_is_404(admin: TestClient):
 
 # ---------------------------------------------------------------- password change
 def test_admin_can_change_another_users_password(
-    app, admin: TestClient, annotator: TestClient
+    app, admin: TestClient, poweruser: TestClient
 ):
     """Resetting a forgotten password is the admin's job; there is no email
     round-trip in this tool and no other way back in."""
     resp = admin.post(
-        f"/api/users/{ANNOTATOR_USER}/password", json={"password": "brand-new-pw"}
+        f"/api/users/{POWERUSER_USER}/password", json={"password": "brand-new-pw"}
     )
     assert resp.status_code == 200
 
     with TestClient(app) as fresh:
         assert fresh.post(
             "/api/login",
-            json={"username": ANNOTATOR_USER, "password": ANNOTATOR_PASSWORD},
+            json={"username": POWERUSER_USER, "password": POWERUSER_PASSWORD},
         ).status_code == 401
         assert fresh.post(
             "/api/login",
-            json={"username": ANNOTATOR_USER, "password": "brand-new-pw"},
+            json={"username": POWERUSER_USER, "password": "brand-new-pw"},
         ).status_code == 200
 
 
-def test_a_user_can_change_their_own_password(app, annotator: TestClient):
-    resp = annotator.post(
-        f"/api/users/{ANNOTATOR_USER}/password", json={"password": "self-chosen-pw"}
+def test_a_user_can_change_their_own_password(app, poweruser: TestClient):
+    resp = poweruser.post(
+        f"/api/users/{POWERUSER_USER}/password", json={"password": "self-chosen-pw"}
     )
     assert resp.status_code == 200
 
     with TestClient(app) as fresh:
         assert fresh.post(
             "/api/login",
-            json={"username": ANNOTATOR_USER, "password": "self-chosen-pw"},
+            json={"username": POWERUSER_USER, "password": "self-chosen-pw"},
         ).status_code == 200
 
 
-def test_an_annotator_cannot_change_someone_elses_password(
-    app, annotator: TestClient
+def test_a_poweruser_cannot_change_someone_elses_password(
+    app, poweruser: TestClient
 ):
     """"Or self" is the whole exception. Without the username check, any
-    annotator could take over the admin account."""
-    resp = annotator.post(
+    poweruser could take over the admin account."""
+    resp = poweruser.post(
         f"/api/users/{ADMIN_USER}/password", json={"password": "hijacked"}
     )
     assert resp.status_code == 403
@@ -271,6 +292,108 @@ def test_an_annotator_cannot_change_someone_elses_password(
         assert fresh.post(
             "/api/login", json={"username": ADMIN_USER, "password": ADMIN_PASSWORD}
         ).status_code == 200
+
+
+# ------------------------------------------------------------- the role rename
+# SPEC section 2 named the second role 'annotator'. That is amended (the SPEC
+# is frozen, so the record lives here and in the code's docstrings): the role
+# is 'poweruser' — still exactly two roles, admin untouched. The old name must
+# be refused loudly, not mapped silently: a stale script that still says
+# 'annotator' should fail at the call site with the fix in the message, never
+# mint an account whose role no gate recognises. And because production stores
+# hold role='annotator' rows written by older builds, the boot path must flip
+# them — idempotently, since the boot block runs on every start.
+
+# The users table exactly as older builds created it, DEFAULT 'annotator'
+# included. Frozen here as text, NOT imported from auth.py: the boot migration
+# under test only exists because stores with this shape are on disk, so the
+# test must keep producing that shape after auth.py stops being able to.
+OLD_USERS_DDL = """
+    CREATE TABLE users (
+        username      TEXT PRIMARY KEY,
+        password_hash TEXT NOT NULL,
+        role          TEXT NOT NULL DEFAULT 'annotator',
+        created_at    TIMESTAMP NOT NULL DEFAULT now()
+    );
+"""
+
+
+def test_me_reports_the_poweruser_role(poweruser: TestClient):
+    """The SPA renders its chrome off this one field, so the wire must say the
+    new role name — a UI checking for 'poweruser' against an API still saying
+    'annotator' would silently downgrade everyone to read-only."""
+    resp = poweruser.get("/api/me")
+    assert resp.status_code == 200
+    assert resp.json() == {"username": POWERUSER_USER, "role": "poweruser"}
+
+
+def test_create_user_accepts_poweruser(admin: TestClient):
+    resp = admin.post(
+        "/api/users",
+        json={"username": "fresh_pu", "password": "pw", "role": "poweruser"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"username": "fresh_pu", "role": "poweruser"}
+    listed = {u["username"]: u["role"] for u in admin.get("/api/users").json()}
+    assert listed["fresh_pu"] == "poweruser"
+
+
+def test_create_user_rejects_the_retired_annotator_role(admin: TestClient):
+    """4xx with the fix in the message. Accepting the old name would recreate
+    the exact rows the boot migration exists to clean up; rejecting it with a
+    bare "bad request" would leave the caller guessing which roles exist."""
+    resp = admin.post(
+        "/api/users",
+        json={"username": "old_script", "password": "pw", "role": "annotator"},
+    )
+    assert 400 <= resp.status_code < 500, resp.text
+    assert "poweruser" in resp.text, (
+        "the refusal must name the role to use instead"
+    )
+    names = {u["username"] for u in admin.get("/api/users").json()}
+    assert "old_script" not in names, "the rejected account must not half-exist"
+
+
+def test_boot_flips_stored_annotator_rows_to_poweruser(store):
+    """A store written by an older build — role='annotator' rows in the users
+    table — comes up with those rows flipped to 'poweruser', through the real
+    boot path (`create_app`), and the flipped account both signs in and holds
+    the new upload right. The password hash must ride through untouched: the
+    scrypt format is self-describing and stable across builds, so a login
+    failure here means the migration rewrote more than the role column.
+
+    The DB-level anatomy of the flip (hash byte-identity, idempotent replay)
+    is pinned in test_db.py next to the other old-shape migrations; this is
+    the end-to-end proof through the HTTP surface."""
+    from bienenblech import auth
+
+    db_path = Path(store.paths.db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect(str(db_path))
+    try:
+        con.execute(OLD_USERS_DDL)
+        con.execute(
+            "INSERT INTO users VALUES (?, ?, 'annotator', now())",
+            ["legacy_user", auth.hash_password("legacy-pw")],
+        )
+    finally:
+        con.close()
+
+    with TestClient(api.create_app(store)) as c:
+        resp = c.post(
+            "/api/login", json={"username": "legacy_user", "password": "legacy-pw"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"username": "legacy_user", "role": "poweruser"}
+        assert c.get("/api/me").json()["role"] == "poweruser"
+
+        up = c.post(
+            "/api/images",
+            files={"file": ("frame.png", frame_bytes(640, 480, seed=11), "image/png")},
+        )
+        assert up.status_code == 200, (
+            "a migrated poweruser must hold the upload right: " + up.text
+        )
 
 
 # ------------------------------------------------------------ login Discord ping
@@ -452,7 +575,7 @@ def test_a_raising_poster_still_yields_200_and_prints_no_webhook(
     client: TestClient, monkeypatch, sync_threads, capsys
 ):
     """The post must NEVER fail the login — an outage of a chat channel that
-    locks every annotator out of the tool would be an absurd coupling. And the
+    locks every user out of the tool would be an absurd coupling. And the
     failure line it prints passes through `api._redact`: urllib embeds the full
     request URL in its exception attributes, so the raw exception text is
     exactly where the bearer credential would otherwise leak into the log."""

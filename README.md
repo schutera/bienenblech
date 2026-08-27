@@ -17,7 +17,7 @@ This is the one load-bearing decision in the project, so it is worth the
 paragraph.
 
 YOLO-seg training assumes **every instance visible in a training image is
-labeled**. An unlabeled bee on a sheet is not "missing data" — it is an explicit
+labeled**. An unlabeled instance on a sheet is not "missing data" — it is an explicit
 *background* teaching signal that actively trains the model to suppress true
 positives. A half-labeled frame is therefore worse than no frame at all.
 
@@ -97,7 +97,9 @@ python -m bienenblech.cli serve --config config/bienenblech.yaml
 
 ## The labeling flow
 
-1. **Upload** one or more frames (admin). The server hashes the original bytes
+1. **Upload** one or more frames. Any signed-in user can upload — there are
+   exactly two roles, **admin** and **poweruser**, and feeding the queue is
+   part of both jobs. The server hashes the original bytes
    (re-uploading the same file is a no-op, reported as a duplicate), writes a
    quality-92 JPEG derivative, and immediately tiles it into crops. Nothing is
    pre-labeled — there is no detector in this tool.
@@ -116,11 +118,11 @@ does not orphan old work.
 
 ## Classes
 
-Classes are created in the app (annotators may add one; only admins archive).
+Classes are created in the app (any signed-in user may add one; only admins archive).
 Each gets a permanent `yolo_index`, assigned monotonically and **never reused or
 renumbered** — an archived class keeps its index, so a model trained on an older
 export still matches the names in a newer one. Deleting a class archives it; its
-masks stay. Nothing here hard-deletes annotator work, with one exception: an
+masks stay. Nothing here hard-deletes labeling work, with one exception: an
 explicit admin image delete, which refuses unless forced when masks exist.
 
 ## Export, and training on it
@@ -130,7 +132,7 @@ GET /api/export/yolo?val_fraction=0.2&seed=0     (admin) -> a zip
 ```
 
 ```
-data.yaml                 # names: {0: bee, 1: ...}, keyed by yolo_index
+data.yaml                 # names: {0: mite, 1: ...}, keyed by yolo_index
 images/train/<crop_id>.jpg    labels/train/<crop_id>.txt
 images/val/<crop_id>.jpg      labels/val/<crop_id>.txt
 README.txt                # export stamp, counts, the completeness invariant
@@ -172,8 +174,8 @@ avoid. An unset webhook is a supported state, not an error.
   sibling project, `cownting`, does that).
 - **No model inference.** No pre-annotation, no active learning, no torch in the
   image. Every polygon here was drawn by a person.
-- **No multi-annotator agreement.** No double-labeling, no inter-annotator IoU,
-  no adjudication queue. One crop, one annotator, done.
+- **No multi-labeler agreement.** No double-labeling, no inter-labeler IoU,
+  no adjudication queue. One crop, one labeler, done.
 - **No instance tracking or identity** across crops or frames. A mask belongs to
   a crop and a class, and that is all it means.
 - **No polygon holes**, no boxes-only mode, no keypoints. YOLO-seg polygons are

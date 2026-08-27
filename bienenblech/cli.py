@@ -4,7 +4,7 @@ The operator's way in on a box with no browser session yet, and the recovery
 path when there is no browser at all:
 
     python -m bienenblech.cli initdb
-    python -m bienenblech.cli adduser alice --role annotator
+    python -m bienenblech.cli adduser alice --role poweruser
     python -m bienenblech.cli serve --host 0.0.0.0 --port 8000
     python -m bienenblech.cli export-yolo out.zip --val-fraction 0.2
     python -m bienenblech.cli backup --force
@@ -79,7 +79,7 @@ def initdb(config: str = CONFIG_OPT):
 def adduser(
     name: str = typer.Argument(..., help="Username."),
     config: str = CONFIG_OPT,
-    role: str = typer.Option("annotator", help="admin | annotator."),
+    role: str = typer.Option("poweruser", help="admin | poweruser."),
     password: str = typer.Option(None, help="Password (prompted if omitted)."),
 ):
     """Create a user account."""

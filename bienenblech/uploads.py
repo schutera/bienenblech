@@ -2,7 +2,7 @@
 
 The whole module exists to make one thing true: **an image row and its crop rows
 are created together or not at all.** A frame that lands with no crops is
-invisible to the labeling queue and looks, to the annotator, exactly like a
+invisible to the labeling queue and looks, to the user, exactly like a
 frame nobody has started - which is why the insert and the tiling share one
 transaction and the JPEG is written before it, where a failure is recoverable
 (an orphan file, cleaned up on the error path) rather than a hole in the queue.
@@ -19,7 +19,7 @@ Two more rules that cost real work if they are broken:
     invalidates every polygon already drawn, because the pixel grid they were
     drawn on no longer exists. `max_edge` is a one-time decision. So is the
     downscale filter (LANCZOS): a different filter would move edges by a pixel
-    or two, which is inside the tolerance annotators work at.
+    or two, which is inside the tolerance users work at.
 """
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def sanitise_filename(name: str) -> str:
     """Reduce a client-supplied filename to a safe display name."""
     raw = str(name or "")
     # Strip BOTH separators before taking the basename: a Windows browser sends
-    # "C:\\Users\\mark\\bee.jpg" and posixpath.basename would keep all of it.
+    # "C:\\Users\\mark\\sheet.jpg" and posixpath.basename would keep all of it.
     raw = raw.replace("\\", "/").rsplit("/", 1)[-1]
     cleaned = _UNSAFE.sub("_", raw).strip().strip(".")
     if not cleaned:

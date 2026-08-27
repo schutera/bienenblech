@@ -6,8 +6,8 @@ import type { ReactNode } from "react";
  *
  * It also carries the completeness instruction, and that line is a product
  * requirement rather than copy: SPEC section 1 makes a crop exportable only when
- * EVERY instance in it has a polygon, because YOLO-seg reads an unlabeled bee as
- * an explicit "this is background" teaching signal. An annotator who forgets
+ * EVERY instance in it has a polygon, because YOLO-seg reads an unlabeled
+ * instance as an explicit "this is background" teaching signal. A labeler who forgets
  * that is not making a small mistake, they are poisoning the training set — so
  * the sentence sits in the layout, in plain words, permanently visible. Not a
  * tooltip, not a one-time modal, and not shouty either: it has to survive being

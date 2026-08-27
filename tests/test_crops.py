@@ -2,7 +2,7 @@
 
 SPEC section 1 is the heart of this tool: *a crop is `done` only when every
 instance of every known class inside it has a polygon, and only `done` crops are
-exported.* An unlabeled bee in a `done` crop is not missing data — it is an
+exported.* An unlabeled instance in a `done` crop is not missing data — it is an
 explicit background teaching signal that trains the model to suppress true
 positives. Amendment A1 makes `POST /api/crops/{id}/complete` the one place that
 invariant can be enforced, because `db.set_crop_status` deliberately stores what
@@ -37,7 +37,7 @@ def _axis_starts(rects: list[dict], axis: str) -> list[int]:
 def _assert_axis_covers(starts: list[int], extent: int, size: int, axis: str) -> None:
     """Every pixel of `0..extent` is inside at least one tile, and no tile hangs
     off the end. `crops.tile` promises total coverage; a gap would be a strip of
-    the frame no annotator is ever shown, which is unlabeled data that still
+    the frame no user is ever shown, which is unlabeled data that still
     looks complete on the progress bar."""
     assert starts[0] == 0, f"{axis} tiling does not start at 0: {starts}"
     assert starts[-1] + size == extent or extent <= size, (
@@ -75,7 +75,7 @@ def test_tiles_are_emitted_in_row_major_order():
 def test_every_tile_is_exactly_the_crop_size():
     """An edge tile is shifted back into the image, never shrunk: a shrunk tile
     would be letterboxed by the trainer, changing the effective object scale for
-    exactly the tiles at the frame border, and would resize the annotator's
+    exactly the tiles at the frame border, and would resize the user's
     canvas between crops for no visible reason."""
     rects = crops.tile(1000, 700, size=CROP_SIZE, overlap=0.0, min_edge=160)
     assert all(r["w"] == CROP_SIZE and r["h"] == CROP_SIZE for r in rects)
@@ -131,7 +131,7 @@ def test_crop_local_to_source_and_back_is_lossless():
 
 def test_writing_clamps_a_vertex_into_the_crop_rect():
     """An instance clipped by a tile edge is correct and expected for YOLO-seg;
-    a vertex the annotator dragged past the canvas must not be stored as if it
+    a vertex the user dragged past the canvas must not be stored as if it
     described pixels of the neighbouring tile."""
     crop = {"x": 1280, "y": 640, "w": 640, "h": 640}
     stored = crops.to_source([[-50.0, -10.0], [700.0, 20.0], [300.0, 999.0]], crop)
@@ -150,7 +150,7 @@ def test_clamping_is_idempotent():
 # ---------------------------------------------------------- the grid via the API
 def test_upload_creates_the_whole_grid(image: dict, crop_rows: list[dict]):
     """An image row and its crop rows are created together or not at all: a
-    frame with no crops is invisible to the queue and looks, to the annotator,
+    frame with no crops is invisible to the queue and looks, to the user,
     exactly like a frame nobody has started."""
     assert image["width"] == FRAME_W and image["height"] == FRAME_H
     assert image["crop_size"] == CROP_SIZE
@@ -191,7 +191,7 @@ def test_unknown_crop_is_404_not_500(admin: TestClient):
 
 # ------------------------------------------------------- coordinates via the API
 def test_mask_points_round_trip_through_the_api(
-    admin: TestClient, bee_class: dict, crop_rows: list[dict], query
+    admin: TestClient, mite_class: dict, crop_rows: list[dict], query
 ):
     """The wire speaks crop-local, the store speaks source-image, and neither
     side may drift. The crop chosen here is the bottom-right one, so both offsets
@@ -202,7 +202,7 @@ def test_mask_points_round_trip_through_the_api(
 
     created = admin.post(
         "/api/masks",
-        json={"crop_id": crop["crop_id"], "class_id": bee_class["class_id"],
+        json={"crop_id": crop["crop_id"], "class_id": mite_class["class_id"],
               "points": local},
     )
     assert created.status_code == 200, created.text
@@ -220,12 +220,12 @@ def test_mask_points_round_trip_through_the_api(
 
 
 def test_points_are_clamped_to_the_crop_through_the_api(
-    admin: TestClient, bee_class: dict, crop_rows: list[dict]
+    admin: TestClient, mite_class: dict, crop_rows: list[dict]
 ):
     crop = crop_rows[0]
     created = admin.post(
         "/api/masks",
-        json={"crop_id": crop["crop_id"], "class_id": bee_class["class_id"],
+        json={"crop_id": crop["crop_id"], "class_id": mite_class["class_id"],
               "points": [[-20.0, 5.0], [700.0, 5.0], [300.0, 900.0]]},
     )
     assert created.status_code == 200, created.text
@@ -237,7 +237,7 @@ def test_crop_index_is_one_based_and_in_reading_order(
     admin: TestClient, crop_rows: list[dict]
 ):
     """A17. The frontend prints `index` verbatim as "Crop 3 of 6", so 0-based
-    would greet every annotator with "Crop 0 of 6" on the first screen they ever
+    would greet every user with "Crop 0 of 6" on the first screen they ever
     see. Ordered `row_idx` then `col_idx`, which is also the order
     `db.next_open_crop` walks, so "next" always moves forward."""
     seen = []
@@ -250,7 +250,7 @@ def test_crop_index_is_one_based_and_in_reading_order(
         assert task["total"] == N_CROPS
         seen.append(task["index"])
     assert seen == [1, 2, 3, 4, 5, 6]
-    assert 0 not in seen, "the first crop an annotator sees must say 1, never 0"
+    assert 0 not in seen, "the first crop a user sees must say 1, never 0"
 
 
 def test_next_walks_the_grid_forward(admin: TestClient, crop_rows: list[dict]):
@@ -278,7 +278,7 @@ def test_next_can_be_scoped_to_one_image(admin: TestClient, image: dict):
 
 # ------------------------------------------- the completeness invariant (1, A1)
 def test_completing_with_masks_and_is_empty_is_refused(
-    admin: TestClient, bee_class: dict, crop_rows: list[dict]
+    admin: TestClient, mite_class: dict, crop_rows: list[dict]
 ):
     """"Empty" is a claim about the pixels, not a shortcut. A crop marked empty
     exports an image with an EMPTY label file (SPEC section 7), so a crop that
@@ -288,7 +288,7 @@ def test_completing_with_masks_and_is_empty_is_refused(
     crop_id = crop_rows[0]["crop_id"]
     admin.post(
         "/api/masks",
-        json={"crop_id": crop_id, "class_id": bee_class["class_id"],
+        json={"crop_id": crop_id, "class_id": mite_class["class_id"],
               "points": TRIANGLE},
     )
     resp = admin.post(f"/api/crops/{crop_id}/complete", json={"is_empty": True})
@@ -302,7 +302,7 @@ def test_completing_with_masks_and_is_empty_is_refused(
 def test_completing_with_no_masks_and_not_empty_is_refused(
     admin: TestClient, crop_rows: list[dict]
 ):
-    """A1. Without this, a crop full of unlabeled bees reaches the export as an
+    """A1. Without this, a crop full of unlabeled instances reaches the export as an
     all-background image and actively teaches the model to suppress true
     positives. It is the one failure this tool exists to prevent, so it is a 400
     and not a tooltip."""
@@ -329,12 +329,12 @@ def test_completing_an_empty_crop_succeeds(admin: TestClient, crop_rows: list[di
 
 
 def test_completing_a_labeled_crop_succeeds(
-    admin: TestClient, bee_class: dict, crop_rows: list[dict]
+    admin: TestClient, mite_class: dict, crop_rows: list[dict]
 ):
     crop_id = crop_rows[0]["crop_id"]
     admin.post(
         "/api/masks",
-        json={"crop_id": crop_id, "class_id": bee_class["class_id"],
+        json={"crop_id": crop_id, "class_id": mite_class["class_id"],
               "points": TRIANGLE},
     )
     resp = admin.post(f"/api/crops/{crop_id}/complete", json={"is_empty": False})

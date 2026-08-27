@@ -63,7 +63,7 @@ _CONNECT_DELAY_MAX = 0.2
 
 # Class colours are picked from this fixed list so two classes created a minute
 # apart never come out near-identical on a photograph. Tailwind's 700 ramp: dark
-# enough to read as an outline over bright comb, distinct at a 20 px polygon.
+# enough to read as an outline over a bright sheet, distinct at a 20 px polygon.
 # Order is stable — changing it recolours nothing already stored, but the next
 # class created lands somewhere new.
 _PALETTE: tuple[str, ...] = (
@@ -375,7 +375,7 @@ def _slug(name: str) -> str:
 def _valid_color(color: str) -> str:
     """'#rrggbb', lowercased. Rejected rather than stored when malformed: this
     string is written into an inline SVG fill in the editor, so anything that is
-    not six hex digits is an injection vector, and classes are annotator-writable
+    not six hex digits is an injection vector, and classes are user-writable
     at runtime."""
     if not isinstance(color, str) or not _COLOR_RE.fullmatch(color.strip()):
         raise ValueError(f"color must be '#rrggbb', got {color!r}")
@@ -400,7 +400,7 @@ def _points_json(points: Sequence[Sequence[float]]) -> str:
 
     SOURCE-IMAGE coordinates in, verbatim: no clamping and no crop offset happen
     here (see the module docstring). Minimum three vertices; self-intersecting
-    polygons are accepted because annotators draw them and the exporter does not
+    polygons are accepted because users draw them and the exporter does not
     care. Non-finite values are refused because `json.dumps` would emit bare
     `NaN`, which is not JSON and which DuckDB would hand back unparseable."""
     pts: list[list[float]] = []
@@ -601,7 +601,7 @@ def next_open_crop(
     """The next crop to label: the oldest still-open one, optionally within one
     image. None when the queue is empty, which the API answers as 204.
 
-    Oldest-first by upload, then in grid order — so an annotator walks a frame to
+    Oldest-first by upload, then in grid order — so a user walks a frame to
     completion instead of scattering done crops across every image on the box,
     and a frame that is nearly finished gets finished."""
     where = "c.status = 'open'"
@@ -661,7 +661,7 @@ def list_classes(
     con: duckdb.DuckDBPyConnection, *, include_archived: bool = False
 ) -> list[dict[str, Any]]:
     """Classes ordered by `yolo_index`, i.e. creation order, i.e. the order they
-    appear in an export's `data.yaml` and under the annotator's number keys."""
+    appear in an export's `data.yaml` and under the user's number keys."""
     where = "" if include_archived else "WHERE NOT lc.archived "
     return _rows(con.execute(
         f"SELECT {_CLASS_COLS} FROM label_classes lc {where}ORDER BY lc.yolo_index"
@@ -792,7 +792,7 @@ def archive_class(
     """Soft-delete a class: it leaves the picker, keeps its masks, and keeps its
     `yolo_index` reserved forever (see `create_class`). There is no hard delete —
     dropping a class would strand every polygon drawn under it, and those are
-    annotator hours."""
+    labeling hours."""
     before = get_class(con, class_id)
     if before is None:
         raise NotFound(f"unknown class {class_id!r}")
@@ -913,7 +913,7 @@ def update_mask(
 
 
 def soft_delete_mask(con: duckdb.DuckDBPyConnection, mask_id: str) -> None:
-    """Flag a mask deleted. Never a DELETE: an annotator who removes the wrong
+    """Flag a mask deleted. Never a DELETE: a user who removes the wrong
     polygon after twenty minutes of tracing wants it back, and the row costs
     nothing. Raises NotFound for an unknown id; deleting twice is a no-op."""
     if con.execute("SELECT 1 FROM masks WHERE mask_id = ?", [mask_id]).fetchone() is None:

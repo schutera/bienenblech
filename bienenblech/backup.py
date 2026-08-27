@@ -121,8 +121,8 @@ _TXN_EXC = getattr(duckdb, "TransactionException", duckdb.Error)
 # posting this archive to a Discord webhook and section 4 puts usernames and
 # scrypt password hashes in `users`, which would make that channel exactly as
 # sensitive as the box. The accounts are the one cheap thing in here: a restore
-# re-bootstraps the admin from BIENENBLECH_ADMIN_* and the annotators are
-# recreated by hand, unlike the annotations. See `snapshot_db` for why this is
+# re-bootstraps the admin from BIENENBLECH_ADMIN_* and the remaining accounts
+# are recreated by hand, unlike the annotations. See `snapshot_db` for why this is
 # an exclusion from the copy rather than a delete afterwards.
 _SNAPSHOT_EXCLUDED_TABLES: tuple[str, ...] = ("users",)
 

@@ -158,11 +158,11 @@ def seeded_store(admin_client: TestClient, cfg: Config) -> dict[str, Any]:
 
     Layout (two frames, 2x2 crops each):
 
-        frame A  r0c0  done, 2 masks (bee + a self-intersecting mite bowtie)
+        frame A  r0c0  done, 2 masks (wax + a self-intersecting mite bowtie)
                  r0c1  done, is_empty  -> must export a 0-byte label
                  r1c0  OPEN, 1 mask    -> must contribute nothing at all
                  r1c1  OPEN, no masks
-        frame B  r0c0  done, 1 bee mask + one polygon inserted straight into the
+        frame B  r0c0  done, 1 wax mask + one polygon inserted straight into the
                        DB with vertices outside the crop rect, to exercise the
                        export clamp (the API clamps on write, so an out-of-rect
                        polygon cannot be created through HTTP)
@@ -172,10 +172,10 @@ def seeded_store(admin_client: TestClient, cfg: Config) -> dict[str, Any]:
     keeps its reserved `yolo_index` forever (SPEC section 4), which is the
     property `data.yaml` and the label lines are checked against.
     """
-    bee = _class(admin_client, "Bee")
+    wax = _class(admin_client, "Wax")
     mite = _class(admin_client, "Mite")
-    drone = _class(admin_client, "Drone")
-    assert [bee["yolo_index"], mite["yolo_index"], drone["yolo_index"]] == [0, 1, 2]
+    pollen = _class(admin_client, "Pollen")
+    assert [wax["yolo_index"], mite["yolo_index"], pollen["yolo_index"]] == [0, 1, 2]
 
     image_a = _upload(admin_client, 1)
     image_b = _upload(admin_client, 2)
@@ -185,20 +185,20 @@ def seeded_store(admin_client: TestClient, cfg: Config) -> dict[str, Any]:
     a10 = db.crop_id_for(image_a, 1, 0)
     b00 = db.crop_id_for(image_b, 0, 0)
 
-    bee_poly = [[4, 4], [40, 4], [40, 32], [4, 32]]
-    # A bowtie: edges cross. SPEC section 3 says annotators draw these and the
+    wax_poly = [[4, 4], [40, 4], [40, 32], [4, 32]]
+    # A bowtie: edges cross. SPEC section 3 says users draw these and the
     # exporter does not care, so it must survive with its vertex order intact.
     bowtie = [[8, 8], [56, 56], [56, 8], [8, 56]]
-    _mask(admin_client, a00, bee["class_id"], bee_poly)
+    _mask(admin_client, a00, wax["class_id"], wax_poly)
     _mask(admin_client, a00, mite["class_id"], bowtie)
     _complete(admin_client, a00)
 
     _complete(admin_client, a01, is_empty=True)
 
-    _mask(admin_client, a10, drone["class_id"], [[10, 10], [50, 10], [30, 50]])
+    _mask(admin_client, a10, pollen["class_id"], [[10, 10], [50, 10], [30, 50]])
     # deliberately NOT completed: leaving a crop open IS the skip (SPEC section 1)
 
-    _mask(admin_client, b00, bee["class_id"], [[2, 2], [60, 2], [60, 60]])
+    _mask(admin_client, b00, wax["class_id"], [[2, 2], [60, 2], [60, 60]])
     _complete(admin_client, b00)
 
     # Straight into the DB, in SOURCE-IMAGE pixels, bypassing the write clamp.
@@ -208,7 +208,7 @@ def seeded_store(admin_client: TestClient, cfg: Config) -> dict[str, Any]:
             con,
             crop_id=b00,
             image_id=image_b,
-            class_id=drone["class_id"],
+            class_id=pollen["class_id"],
             points=[[-40.0, -40.0], [100.0, 20.0], [30.0, 120.0]],
             actor="fixture",
         )
@@ -221,7 +221,7 @@ def seeded_store(admin_client: TestClient, cfg: Config) -> dict[str, Any]:
     return {
         "image_a": image_a, "image_b": image_b,
         "a00": a00, "a01": a01, "a10": a10, "b00": b00,
-        "bee": bee, "mite": mite, "drone": drone,
+        "wax": wax, "mite": mite, "pollen": pollen,
         "out_of_rect_mask_id": out_of_rect["mask_id"],
         "done_crops": {a00, a01, b00},
         "open_crops": {a10, db.crop_id_for(image_a, 1, 1),
@@ -320,7 +320,7 @@ def test_only_done_crops_are_exported_even_when_an_open_crop_has_masks(
 ):
     """SPEC section 1: leaving a crop `open` IS the skip.
 
-    An open crop may already carry polygons — an annotator half way through one —
+    An open crop may already carry polygons — a user half way through one —
     and exporting it would ship a tile whose remaining instances are unlabeled.
     YOLO-seg reads every unlabeled instance as an explicit *background* example,
     so a half-labeled tile does not contribute less, it actively trains the model
@@ -425,7 +425,7 @@ def test_normalization_is_crop_relative_and_clamped(seeded_store, cfg, tmp_path)
 
     # The clamped polygon specifically: -40 and 120 px on a 64 px tile.
     b00 = _label(zip_path, seeded_store["b00"]).decode("utf-8").splitlines()
-    clamped = [l for l in b00 if l.startswith(f"{seeded_store['drone']['yolo_index']} ")]
+    clamped = [l for l in b00 if l.startswith(f"{seeded_store['pollen']['yolo_index']} ")]
     assert len(clamped) == 1
     values = [float(v) for v in clamped[0].split(" ")[1:]]
     assert values == pytest.approx(
@@ -434,12 +434,12 @@ def test_normalization_is_crop_relative_and_clamped(seeded_store, cfg, tmp_path)
 
 
 def test_self_intersecting_polygon_survives_export(seeded_store, cfg, tmp_path):
-    """SPEC section 3 accepts self-intersecting polygons: annotators draw them,
+    """SPEC section 3 accepts self-intersecting polygons: users draw them,
     and the exporter explicitly does not care.
 
     Vertex ORDER is part of the polygon, so this also pins that the exporter does
     not quietly reorder or convex-hull the ring — a "repair" that would change the
-    shape the annotator actually traced, without ever failing loudly."""
+    shape the user actually traced, without ever failing loudly."""
     zip_path, _ = _build(cfg, tmp_path)
     lines = _label(zip_path, seeded_store["a00"]).decode("utf-8").splitlines()
     mite_index = seeded_store["mite"]["yolo_index"]
@@ -460,9 +460,9 @@ def test_class_index_written_is_the_yolo_index(seeded_store, cfg, tmp_path):
     zip_path, _ = _build(cfg, tmp_path)
     lines = _label(zip_path, seeded_store["a00"]).decode("utf-8").splitlines()
     assert sorted(int(l.split(" ", 1)[0]) for l in lines if l.strip()) == [
-        seeded_store["bee"]["yolo_index"], seeded_store["mite"]["yolo_index"]
+        seeded_store["wax"]["yolo_index"], seeded_store["mite"]["yolo_index"]
     ]
-    assert seeded_store["bee"]["yolo_index"] == 0 and seeded_store["mite"]["yolo_index"] == 1
+    assert seeded_store["wax"]["yolo_index"] == 0 and seeded_store["mite"]["yolo_index"] == 1
 
 
 def test_archived_class_keeps_its_index_in_the_export(seeded_store, cfg, tmp_path):
@@ -470,19 +470,19 @@ def test_archived_class_keeps_its_index_in_the_export(seeded_store, cfg, tmp_pat
     (SPEC sections 4 and 7).
 
     'Mite' is archived in the fixture and still owns index 1. If archiving
-    renumbered — or dropped the name from `names:` and let 'Drone' slide from 2
+    renumbered — or dropped the name from `names:` and let 'Pollen' slide from 2
     to 1 — then every checkpoint trained against an older export would keep
     predicting index 1 and every one of those predictions would silently become
-    'Drone'. There is no error anywhere in that chain; the model simply reports
-    the wrong species forever."""
+    'Pollen'. There is no error anywhere in that chain; the model simply reports
+    the wrong class forever."""
     zip_path, _ = _build(cfg, tmp_path)
     with zipfile.ZipFile(zip_path) as zf:
         doc = yaml.safe_load(zf.read("data.yaml").decode("utf-8"))
 
     names = doc["names"]
     assert names[seeded_store["mite"]["yolo_index"]] == "Mite"
-    assert names[seeded_store["bee"]["yolo_index"]] == "Bee"
-    assert names[seeded_store["drone"]["yolo_index"]] == "Drone"
+    assert names[seeded_store["wax"]["yolo_index"]] == "Wax"
+    assert names[seeded_store["pollen"]["yolo_index"]] == "Pollen"
     assert doc["nc"] == len(names) == 3
     assert sorted(names) == [0, 1, 2], "an archived class must not open a gap"
 
@@ -556,7 +556,7 @@ def test_every_exported_crop_lands_in_exactly_one_side(seeded_store, cfg, tmp_pa
 def test_crops_of_one_frame_never_straddle_the_split(seeded_store, cfg, tmp_path):
     """SPEC section 7: the split is grouped by `image_id`, never by crop.
 
-    Two tiles of one 4000x3000 frame share lighting, hive furniture and often
+    Two tiles of one 4000x3000 frame share lighting, sheet furniture and often
     overlapping pixels at the seam. One in train and one in val is textbook
     leakage: the val loss drops, the metric stops measuring generalisation, and
     the model looks ready when it is not."""
@@ -605,9 +605,9 @@ def test_export_refuses_a_store_with_no_done_crop(admin_client, cfg, tmp_path):
     """An empty dataset is a request that cannot be honoured yet, not an empty
     zip. Ultralytics happily accepts a dataset with zero images and burns a full
     training run producing a checkpoint that predicts nothing."""
-    bee = _class(admin_client, "Bee")
+    wax = _class(admin_client, "Wax")
     image_id = _upload(admin_client, 9)
-    _mask(admin_client, db.crop_id_for(image_id, 0, 0), bee["class_id"],
+    _mask(admin_client, db.crop_id_for(image_id, 0, 0), wax["class_id"],
           [[1, 1], [20, 1], [20, 20]])  # drawn, but the crop is left open
 
     with pytest.raises(export.EmptyExport):

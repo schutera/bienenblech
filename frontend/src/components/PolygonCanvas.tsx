@@ -34,7 +34,7 @@ import {
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 32;
 
-/** Past this zoom the browser's smoothing hides the pixel grid the annotator is
+/** Past this zoom the browser's smoothing hides the pixel grid the labeler is
  *  trying to trace, so switch to nearest-neighbour. */
 const PIXELATE_AT = 4;
 
@@ -101,7 +101,7 @@ type Gesture =
   | { kind: "draw"; startX: number; startY: number; freehand: boolean }
   | null;
 
-/** Keys are ignored while the annotator is typing a class name, a note, ... */
+/** Keys are ignored while the user is typing a class name, a note, ... */
 function isTypingTarget(t: EventTarget | null): boolean {
   const el = t as HTMLElement | null;
   if (!el || !el.tagName) return false;
@@ -230,7 +230,7 @@ export default function PolygonCanvas({
   }, []);
 
   // Fit once per crop, then only re-clamp. Refitting on every resize would throw
-  // away the annotator's zoom whenever the window changed by a pixel.
+  // away the labeler's zoom whenever the window changed by a pixel.
   const fittedFor = useRef("");
   useEffect(() => {
     const { w, h } = sizeRef.current;
@@ -322,7 +322,7 @@ export default function PolygonCanvas({
 
   /**
    * Topmost mask under an image-space point, resolving overlaps by SMALLEST
-   * area: a bee drawn on top of a large blob has to stay clickable, and it
+   * area: a small instance drawn on top of a large blob has to stay clickable, and it
    * never would if the big polygon won every hit test.
    */
   const hitMask = useCallback(
@@ -687,7 +687,7 @@ export default function PolygonCanvas({
           return;
         case " ":
           // Space is the pan modifier; without preventDefault the page scrolls
-          // under the canvas while the annotator is holding it.
+          // under the canvas while the labeler is holding it.
           e.preventDefault();
           setSpaceHeld(true);
           return;
@@ -955,7 +955,7 @@ export default function PolygonCanvas({
         </div>
       ) : null}
 
-      {/* Always visible: an annotator should never have to remember this, and a
+      {/* Always visible: a labeler should never have to remember this, and a
           tooltip is not a place to keep a keyboard map. */}
       <div
         className="absolute bottom-2 left-2 bg-surface/90 border border-border px-2.5 py-2 font-mono text-[10px] leading-[1.5] text-gray-mid"

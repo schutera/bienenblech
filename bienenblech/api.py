@@ -74,7 +74,7 @@ class LoginReq(BaseModel):
 class CreateUserReq(BaseModel):
     username: str
     password: str
-    role: str = "annotator"
+    role: str = "poweruser"
 
 
 class PasswordReq(BaseModel):
@@ -102,7 +102,7 @@ class CreateMaskReq(BaseModel):
     class_id: str
     # Deliberately untyped: `list[list[float]]` would let pydantic answer 422 for
     # a malformed polygon, and SPEC section 5 says a bad polygon is a 400 with a
-    # sentence the annotator can act on. crops.validate_points writes that
+    # sentence the user can act on. crops.validate_points writes that
     # sentence.
     points: Any = None
 
@@ -121,7 +121,7 @@ def _session_secret() -> str:
     """The signing key for the session cookie.
 
     `BIENENBLECH_SECRET` or nothing: an ephemeral key means every restart logs
-    every annotator out mid-crop, so in a container that is a boot failure, not
+    every user out mid-crop, so in a container that is a boot failure, not
     a warning. On a dev box it is merely annoying, so there it is a warning and
     a generated key.
     """
@@ -132,7 +132,7 @@ def _session_secret() -> str:
     if in_container:
         raise RuntimeError(
             "BIENENBLECH_SECRET is not set. Refusing to boot with an ephemeral "
-            "session key: every restart would sign out every annotator. Set it in "
+            "session key: every restart would sign out every user. Set it in "
             "the compose environment."
         )
     print(
@@ -341,7 +341,7 @@ def _crop_task(con: Any, crop: Mapping[str, Any]) -> dict:
     `index` is 1-BASED. SPEC section 6 only says "position in this image's crop
     grid"; the editor workstream's progress component takes a 1-based prop and
     prints "Crop {index} of {total}" verbatim, so 0-based would greet every
-    annotator with "Crop 0 of 24". The order is `row_idx` then `col_idx` -
+    user with "Crop 0 of 24". The order is `row_idx` then `col_idx` -
     reading order - which is also the order `next_open_crop` walks, so "next"
     always moves forward in the progress line.
 
@@ -534,15 +534,22 @@ def create_app(config: Config | None = None) -> FastAPI:
         return {"ok": True}
 
     # ------------------------------------------------------------------ images
-    @app.post("/api/images", dependencies=[Depends(require_admin)])
+    @app.post("/api/images")
     def upload_images(file: list[UploadFile] = File(...),
                       user: dict = Depends(current_user),
                       con: Any = Depends(get_con)):
         """Land one or more frames and tile each of them.
 
+        Open to any signed-in user, not just admins — an amendment to SPEC
+        section 2, recorded here because the SPEC is frozen (section 11).
+        Powerusers upload the sheets they label, and with exactly two roles,
+        admin and poweruser, "signed in" is the honest spelling of "admin or
+        poweruser". Deletion is a different animal — it destroys labeling
+        hours — so DELETE /api/images/{image_id} stays admin-only.
+
         A sync def, so Starlette runs it in a threadpool: reading a 200 MB
         multipart part and re-encoding it with Pillow must not block the event
-        loop while other annotators are labeling.
+        loop while other users are labeling.
 
         Cheap checks (extension, size) run over the whole batch first, so a
         rejected batch is rejected before anything is written. A file that only
@@ -601,7 +608,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         """The one hard delete in this system (SPEC section 4).
 
         It refuses an image that carries masks unless `?force=true`, because
-        annotator hours are the only thing on this box that cannot be
+        labeling hours are the only thing on this box that cannot be
         regenerated and a mis-clicked row in an image list is a plausible way to
         lose a week of them.
         """
@@ -700,7 +707,8 @@ def create_app(config: Config | None = None) -> FastAPI:
                      con: Any = Depends(get_con)):
         """Create a class. Open to any signed-in user, deliberately.
 
-        SPEC section 2 grants annotators "label crops, add classes, read" in so
+        SPEC section 2 grants the labeling role - now 'poweruser'; the frozen
+        SPEC text says 'annotator' - "label crops, add classes, read" in so
         many words, so this route is not gated - and it is the one class route
         that is not. Creation is additive and local: a new class costs a fresh
         yolo_index (db.py's to assign, and never reused) and changes nothing
@@ -720,9 +728,9 @@ def create_app(config: Config | None = None) -> FastAPI:
 
         A rename or a recolor is exactly as globally visible as an archive: it
         rewrites every picker, every legend and every export's `data.yaml` for
-        every user at once, and the annotator who did it cannot see who else was
+        every user at once, and the poweruser who did it cannot see who else was
         mid-crop against the old name. So it sits on the same side of the line as
-        archive and restore - creation is the annotator's (SPEC section 2 grants
+        archive and restore - creation is the poweruser's (SPEC section 2 grants
         "add classes"), curation is the admin's (section 2 grants admins
         "everything: users, classes, upload, delete, export, backup").
 

@@ -108,7 +108,7 @@ export function RequireAuth({ children }: { children: ReactNode }) {
 
 /**
  * Route wrapper for admin-only pages. It renders a panel instead of redirecting
- * on purpose: an annotator who follows a link to /admin should be told the page
+ * on purpose: a poweruser who follows a link to /admin should be told the page
  * exists and is not theirs, not silently teleported home wondering whether the
  * click registered.
  */
@@ -121,9 +121,9 @@ export function RequireAdmin({ children }: { children: ReactNode }) {
         Admin only
       </h1>
       <p className="text-[13px] text-gray-mid mt-2">
-        This page manages accounts, uploads, deletions, backups and the export.
-        Your account has the annotator role, which can label crops and add
-        classes. An admin can change that for you.
+        This page manages accounts, frame deletion, backups and the export.
+        Your account has the poweruser role, which can label crops, upload
+        frames and add classes. An admin can change that for you.
       </p>
     </Card>
   );

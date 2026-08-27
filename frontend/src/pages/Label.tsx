@@ -1,5 +1,5 @@
 /**
- * The labeling screen — the one place annotator time is actually spent.
+ * The labeling screen — the one place labeling time is actually spent.
  *
  * Three things here are product requirements rather than taste, and all three
  * come from SPEC section 1:
@@ -16,7 +16,7 @@
  *    invite "done, but I gave up", which is the exact poison the crop design
  *    exists to prevent.
  *
- * Mask edits are optimistic with rollback: at 200-plus instances an annotator
+ * Mask edits are optimistic with rollback: at 200-plus instances a labeler
  * cannot wait for a round trip per polygon, but they must never end up believing
  * a polygon was saved when it was not — so a failure puts the canvas back the way
  * it was and says so.
@@ -50,7 +50,7 @@ const TEMP = "temp-";
 const newTempId = () => `${TEMP}${++tempSeq}`;
 const isTemp = (id: string) => id.startsWith(TEMP);
 
-/** Digits must not fire while the annotator is typing a new class name. */
+/** Digits must not fire while the user is typing a new class name. */
 function isTypingTarget(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
   if (!el || typeof el.tagName !== "string") return false;
@@ -61,7 +61,7 @@ function isTypingTarget(target: EventTarget | null): boolean {
 export default function Label() {
   const { cropId } = useParams<{ cropId?: string }>();
   const navigate = useNavigate();
-  const { me, isAdmin } = useAuth();
+  const { me } = useAuth();
 
   const [task, setTask] = useState<CropTask | null>(null);
   const [masks, setMasks] = useState<Mask[]>([]);
@@ -376,20 +376,8 @@ export default function Label() {
         {error ? <ErrorNote className="mb-6" onDismiss={() => setError(null)}>{error}</ErrorNote> : null}
         <EmptyState
           title="No open crops left"
-          body={
-            isAdmin
-              ? "Every crop of every uploaded frame has been marked done or empty. Upload another frame to keep going, or reopen a crop from the Images page to revisit it."
-              : "Every crop of every uploaded frame has been marked done or empty. An admin can upload another frame; until then there is nothing in the queue."
-          }
-          action={
-            isAdmin ? (
-              <Button onClick={() => navigate("/upload")}>Upload a frame</Button>
-            ) : (
-              <Button variant="ghost" onClick={() => navigate("/images")}>
-                Browse frames
-              </Button>
-            )
-          }
+          body="Every crop of every uploaded frame has been marked done or empty. Upload another frame to keep going, or reopen a crop from its frame's grid on the Overview to revisit it."
+          action={<Button onClick={() => navigate("/upload")}>Upload a frame</Button>}
         />
       </div>
     );
@@ -465,11 +453,9 @@ export default function Label() {
             />
             {activeClasses.length === 0 ? (
               <p className="text-[12px] text-gray-tertiary mt-3">
-                No classes exist yet. Add the first one here, or on the{" "}
-                <Link to="/classes" className="text-accent hover:text-accent-deep">
-                  Classes page
-                </Link>
-                .
+                No classes exist yet. Add the first one right here in the picker
+                above — a polygon cannot be drawn until a class exists to put it
+                in.
               </p>
             ) : (
               <p className="text-[12px] text-gray-tertiary mt-3">
@@ -554,7 +540,7 @@ export default function Label() {
               in a {task.image.width}x{task.image.height} frame.
             </p>
             <Link
-              to="/images"
+              to="/"
               className="text-[13px] text-accent hover:text-accent-deep transition-colors inline-block mt-2"
             >
               See the whole frame

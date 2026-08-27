@@ -430,7 +430,7 @@ export function EmptyState({
 
 /**
  * A modal confirm. Destructive confirms in this app must say what is lost in
- * counted nouns ("24 crops, 137 masks"), never "are you sure" — annotator hours
+ * counted nouns ("24 crops, 137 masks"), never "are you sure" — labeling hours
  * are the only thing on the box that cannot be regenerated.
  */
 export function ConfirmDialog({

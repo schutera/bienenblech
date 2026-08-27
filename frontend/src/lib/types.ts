@@ -10,7 +10,13 @@
  * shapes are frozen and which are inferred from an underspecified endpoint.
  */
 
-export type Role = "admin" | "annotator";
+/**
+ * Amends SPEC sections 2 and 6: the non-admin role is now `poweruser` — same
+ * rights plus upload. The SPEC keeps its original role name as the frozen
+ * contract; a boot migration renames existing rows, so the old value never
+ * reaches the browser. Still exactly two roles.
+ */
+export type Role = "admin" | "poweruser";
 export type Me = { username: string; role: Role };
 
 export type LabelClass = {

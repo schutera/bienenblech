@@ -92,8 +92,9 @@ Log in with those, then change the password. Once any user exists the bootstrap
 is skipped, so editing those variables later has no effect — accounts are managed
 in the Admin page from then on.
 
-Roles are two: **admin** (users, classes, upload, delete, export, backup) and
-**annotator** (label crops, add classes, read). There is no third role.
+Roles are two: **admin** (users, class curation, frame deletion, export, backup)
+and **poweruser** (label crops, upload frames, add classes, read). There is no
+third role. Any signed-in account may upload; deletion stays admin-only.
 
 Check it is really up:
 

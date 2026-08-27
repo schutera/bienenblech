@@ -8,7 +8,7 @@ because `backup.ensure_backup_tables` happened to run first: such a store works
 on the box where backups ran and fails on the box where they never did, which is
 exactly the deployment nobody tests.
 
-Two concrete shapes are defended:
+Three concrete shapes are defended:
 
 - `backup_runs.delivery` (A13) must come from `init_db` itself, so the delivery
   reason is recordable even on a store whose backup module never opened it.
@@ -16,7 +16,12 @@ Two concrete shapes are defended:
   config bump past `upload.max_mb: ~2048` would overflow it silently. New
   stores must be born BIGINT, and a store created back when the column was
   INTEGER must be migrated up by the next `init_db` — with its rows intact,
-  because those rows describe images that annotator hours refer to.
+  because those rows describe images that labeling hours refer to.
+- `users.role` rows saying 'annotator' must come up as 'poweruser' (the role
+  rename amends SPEC section 2; the SPEC is frozen, so the record lives here).
+  Older builds wrote 'annotator' rows and production holds them, so the flip
+  must run inside the boot path — `init_db` brings up the users table (A6) —
+  and replay as a no-op on every subsequent boot.
 
 Everything runs against throwaway DuckDB files under `tmp_path`; no Config, no
 HTTP, no network, and never `data/`.
@@ -269,3 +274,79 @@ def test_init_db_twice_on_a_migrated_old_store_changes_nothing_further(con):
         'SELECT image_id, "bytes" FROM images ORDER BY image_id'
     ).fetchall() == rows
     assert con.execute("SELECT count(*) FROM backup_runs").fetchone()[0] == 1
+
+
+# --------------------------------------------------------- the users role flip
+
+# `users` exactly as older builds created it — the second role was 'annotator'
+# then, so the DEFAULT says so. Frozen as text, NOT imported from auth.py, for
+# the same reason as the DDL blocks above: the migration under test only exists
+# because stores with this shape are on disk, so the test must keep producing
+# it after auth.py stops being able to.
+OLD_USERS_DDL = """
+    CREATE TABLE users (
+        username      TEXT PRIMARY KEY,
+        password_hash TEXT NOT NULL,
+        role          TEXT NOT NULL DEFAULT 'annotator',
+        created_at    TIMESTAMP NOT NULL DEFAULT now()
+    );
+"""
+
+# A literal hash in the self-describing `scrypt$N$r$p$salt$hash` shape. Not a
+# real credential and never verified here — what matters is byte-identity: the
+# role flip must not touch the hash column, because a migration that rewrote it
+# would lock every existing user out on the first boot after the upgrade.
+FROZEN_HASH = "scrypt$16384$8$1$" + "ab" * 16 + "$" + "cd" * 32
+
+
+def _seed_old_users(con: duckdb.DuckDBPyConnection) -> None:
+    """Users as an older build left them: one of each role, by hand."""
+    con.execute(OLD_USERS_DDL)
+    con.execute(
+        "INSERT INTO users VALUES ('alice', ?, 'annotator', now())", [FROZEN_HASH]
+    )
+    con.execute(
+        "INSERT INTO users VALUES ('root', ?, 'admin', now())", [FROZEN_HASH]
+    )
+
+
+def test_init_db_flips_annotator_rows_to_poweruser(con):
+    """The role rename, at the store level: 'annotator' rows become 'poweruser'
+    through `init_db` ALONE (A6 routes the users table through it, so every
+    boot path inherits the flip). Without this, existing accounts would hold a
+    role no API gate recognises — not read-only, but locked out of everything —
+    and the admin rows must ride through untouched, because a flip that widened
+    its WHERE clause would silently promote or demote the wrong rows."""
+    _seed_old_users(con)
+
+    db.init_db(con)
+
+    rows = dict(con.execute("SELECT username, role FROM users").fetchall())
+    assert rows == {"alice": "poweruser", "root": "admin"}, (
+        "init_db must flip exactly the 'annotator' rows to 'poweruser'"
+    )
+    hashes = con.execute("SELECT password_hash FROM users").fetchall()
+    assert all(h == (FROZEN_HASH,) for h in hashes), (
+        "the role flip rewrote password hashes; every user is now locked out"
+    )
+
+
+def test_the_role_flip_replays_as_a_no_op(con):
+    """The boot block runs on every start, so the flip's second run IS the
+    common case: same schema, same rows, byte for byte — including timestamps,
+    which is what catches a flip implemented as delete-and-reinsert."""
+    _seed_old_users(con)
+    db.init_db(con)
+    first = con.execute(
+        "SELECT username, password_hash, role, created_at "
+        "FROM users ORDER BY username"
+    ).fetchall()
+    assert {r[2] for r in first} == {"admin", "poweruser"}  # the flip happened
+
+    db.init_db(con)
+
+    second = con.execute(
+        "SELECT username, password_hash, role, created_at "
+        "FROM users ORDER BY username"
+    ).fetchall()
+    assert second == first, "replaying the boot path disturbed migrated users"

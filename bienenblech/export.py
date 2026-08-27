@@ -13,8 +13,8 @@ nothing is a hard negative, which is worth real money in a segmentation dataset.
 Two more things here are easy to "clean up" into bugs:
 
 - **The train/val split is grouped by `image_id`, never by crop.** Tiles of one
-  4000x3000 frame share lighting, bees, hive furniture and often overlap at the
-  seams; two tiles of the same frame on opposite sides of the split is textbook
+  4000x3000 frame share lighting, debris and sheet texture and often overlap at
+  the seams; two tiles of the same frame on opposite sides of the split is textbook
   leakage and turns the val metric into a flattering lie. `split_for_image` is
   keyed by image_id for that reason alone — read its docstring before refactoring
   it to "just hash the crop_id", which is the obvious-looking change.
@@ -56,7 +56,7 @@ from .config import Config
 _MIN_VERTICES = 3
 
 # 6 decimals on a 640 px tile is ~0.0006 px of quantisation — far below the
-# precision an annotator's mouse has — and it keeps the label files small.
+# precision a user's mouse has — and it keeps the label files small.
 _COORD_FMT = "%.6f"
 
 # JPEGs are already compressed; deflating them again costs CPU per crop for ~0%.
@@ -136,7 +136,7 @@ def split_for_image(image_id: str, *, seed: int, val_fraction: float) -> str:
 
     **Grouped by image_id on purpose.** Every crop of one frame lands in the same
     split. Splitting per crop would put two tiles of the same 4000x3000 frame —
-    same hive, same light, same bees, often overlapping pixels at the seam — on
+    same sheet, same light, same debris, often overlapping pixels at the seam — on
     opposite sides of the split. That is textbook leakage: the val loss drops, the
     metric stops measuring generalisation, and the model looks ready when it is
     not. Anyone refactoring this to hash the crop_id "because the crop is the unit
@@ -164,9 +164,9 @@ def label_lines(
     `<yolo_index> x1 y1 x2 y2 ... xn yn`, normalized to the crop rect
     (`(px - crop.x) / crop.w`) and clamped to [0,1]. The clamp is not defensive
     noise: SPEC section 3 clamps on write too, and an instance genuinely clipped
-    by a tile edge must stay clipped rather than be dropped — a bee cut in half by
-    a seam is still a bee, and dropping it would make the crop incomplete, which
-    is the one thing the `done` invariant forbids.
+    by a tile edge must stay clipped rather than be dropped — an instance cut in
+    half by a seam is still an instance, and dropping it would make the crop
+    incomplete, which is the one thing the `done` invariant forbids.
 
     Polygons with fewer than 3 vertices are skipped rather than emitted; so are
     masks whose class is absent from `class_index` (an unknown class id cannot be
@@ -199,7 +199,7 @@ def label_lines(
 # ------------------------------------------------------------------- data.yaml
 
 def _yaml_scalar(text: str) -> str:
-    """Single-quoted YAML scalar. Class names are annotator-supplied free text and
+    """Single-quoted YAML scalar. Class names are user-supplied free text and
     may contain ':' or '#', either of which silently changes the parse."""
     return "'" + str(text).replace("'", "''") + "'"
 
@@ -286,8 +286,8 @@ The completeness invariant
 Only crops marked `done` are in here. A crop is `done` only when EVERY instance
 of every known class inside it has a polygon. That is not bookkeeping: YOLO-seg
 treats any unlabeled instance in a training image as an explicit background
-example, so one missed bee actively teaches the model to suppress true positives.
-Crops still `open` were omitted entirely.
+example, so one missed instance actively teaches the model to suppress true
+positives. Crops still `open` were omitted entirely.
 
 A zero-byte .txt is deliberate. Its crop was reviewed and marked empty, and it is
 a hard negative — keep it. Do not "clean up" the label files with no content.
@@ -369,7 +369,7 @@ def build_yolo_zip(
                     # somehow still carries masks, its polygons are exported
                     # rather than dropped: dropping labeled instances is the poison
                     # this whole design exists to avoid, and a hard negative with
-                    # bees in it would be worse than either.
+                    # instances in it would be worse than either.
                     lines = label_lines(by_crop.get(crop_id, ()), crop_row, class_index)
                     jpg = crops.render_crop(config, image_row, crop_row)
                     zf.write(jpg, f"images/{split}/{crop_id}.jpg", compress_type=_IMG_COMPRESS)

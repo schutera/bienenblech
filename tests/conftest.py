@@ -1,7 +1,7 @@
 """Shared fixtures. Every test in this suite runs against a throwaway store.
 
 **The one rule that matters here: no test ever touches `data/`.** The real
-`data/bienenblech.duckdb` holds annotator hours, which SPEC section 4 calls the
+`data/bienenblech.duckdb` holds labeling hours, which SPEC section 4 calls the
 only thing on this box that cannot be regenerated — a test run that corrupted it
 would be worse than having no tests at all. So the `store` fixture builds a
 `Config` whose four paths all live under pytest's `tmp_path`, asserts that they
@@ -44,8 +44,8 @@ N_CROPS = GRID_COLS * GRID_ROWS
 
 ADMIN_USER = "admin_test"
 ADMIN_PASSWORD = "admin-pw-not-a-secret"
-ANNOTATOR_USER = "annot_test"
-ANNOTATOR_PASSWORD = "annot-pw-not-a-secret"
+POWERUSER_USER = "power_test"
+POWERUSER_PASSWORD = "power-pw-not-a-secret"
 
 
 def frame_bytes(width: int = FRAME_W, height: int = FRAME_H, *, seed: int = 0) -> bytes:
@@ -139,24 +139,30 @@ def admin(app: FastAPI) -> Iterator[TestClient]:
 
 
 @pytest.fixture
-def annotator(app: FastAPI, admin: TestClient) -> Iterator[TestClient]:
-    """A client logged in as an annotator, created by the admin through the API."""
+def poweruser(app: FastAPI, admin: TestClient) -> Iterator[TestClient]:
+    """A client logged in as a poweruser, created by the admin through the API.
+
+    'poweruser' is the second of the two roles; it replaces the role SPEC
+    section 2 called 'annotator' (an amendment recorded here because the SPEC
+    is frozen). Same two-role model, admin unchanged — but powerusers may
+    additionally upload frames, which is why `POST /api/images` is open to any
+    signed-in user."""
     resp = admin.post(
         "/api/users",
         json={
-            "username": ANNOTATOR_USER,
-            "password": ANNOTATOR_PASSWORD,
-            "role": "annotator",
+            "username": POWERUSER_USER,
+            "password": POWERUSER_PASSWORD,
+            "role": "poweruser",
         },
     )
     assert resp.status_code == 200, resp.text
     with TestClient(app) as c:
         resp = c.post(
             "/api/login",
-            json={"username": ANNOTATOR_USER, "password": ANNOTATOR_PASSWORD},
+            json={"username": POWERUSER_USER, "password": POWERUSER_PASSWORD},
         )
         assert resp.status_code == 200, resp.text
-        assert resp.json()["role"] == "annotator"
+        assert resp.json()["role"] == "poweruser"
         yield c
 
 
@@ -190,9 +196,9 @@ def crop_rows(admin: TestClient, image: dict) -> list[dict]:
 
 
 @pytest.fixture
-def bee_class(admin: TestClient) -> dict:
+def mite_class(admin: TestClient) -> dict:
     """One label class to hang masks off."""
-    resp = admin.post("/api/classes", json={"name": "bee"})
+    resp = admin.post("/api/classes", json={"name": "mite"})
     assert resp.status_code == 200, resp.text
     return resp.json()
 

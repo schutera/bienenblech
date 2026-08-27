@@ -5,9 +5,12 @@ with stdlib scrypt (no extra dependency, no native build in the slim image), and
 two roles. The session *cookie* is Starlette's SessionMiddleware in `api.py`;
 this module owns only the credential store.
 
-Two roles, not three (SPEC section 2): **admin** does everything — users,
-classes, upload, delete, export, backup — and **annotator** labels crops, adds
-classes and reads. A third tier was tried in the sibling project and every
+Two roles, not three (SPEC section 2, amended in place): **admin** does
+everything — users, classes, delete, export, backup — and **poweruser** labels
+crops, adds classes, uploads frames and reads. The SPEC froze the second role
+under the name 'annotator'; it was renamed to 'poweruser' afterwards, and the
+rename is recorded here rather than in the SPEC, which section 11 freezes.
+A third tier was tried in the sibling project and every
 question it answered ("who may download?") turned out to be a question about
 admin. Resist adding one back: `is_admin` is the only gate the API needs, and a
 role that is not in `ROLES` is rejected at write time so a typo cannot create a
@@ -27,8 +30,8 @@ from typing import Literal, Optional, TypedDict
 
 import duckdb
 
-Role = Literal["admin", "annotator"]
-ROLES: tuple[Role, ...] = ("admin", "annotator")
+Role = Literal["admin", "poweruser"]
+ROLES: tuple[Role, ...] = ("admin", "poweruser")
 
 # Env vars for the first-boot admin. Prefixed BIENENBLECH_ like everything else;
 # read here at the point of use and never through Config, because config/ is
@@ -97,21 +100,31 @@ def verify_password(password: str, stored: str) -> bool:
 
 # ----------------------------------------------------------------------- store
 def ensure_user_table(con: duckdb.DuckDBPyConnection) -> None:
-    """Create the users table if absent. Idempotent, safe on every boot.
+    """Create the users table if absent and migrate old role names. Idempotent,
+    safe on every boot.
 
     Called by `db.init_db` as well, so app startup only has to make one call —
     but kept public and standalone because the CLI's user commands may run
-    against a DB the server has never opened."""
+    against a DB the server has never opened.
+
+    The UPDATE amends SPEC section 2: the labeling role shipped as 'annotator'
+    and was renamed to 'poweruser' after stores already held rows under the old
+    name, which `ROLES` no longer accepts. Flipping them here — in the module
+    that owns the table, on a call every boot path already makes — heals any
+    pre-rename store for free. On a fresh DB or an already-migrated one the
+    WHERE matches nothing and the statement is a no-op, which is what makes it
+    safe to run forever."""
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
             username      TEXT PRIMARY KEY,
             password_hash TEXT NOT NULL,
-            role          TEXT NOT NULL DEFAULT 'annotator',
+            role          TEXT NOT NULL DEFAULT 'poweruser',
             created_at    TIMESTAMP NOT NULL DEFAULT now()
         );
         """
     )
+    con.execute("UPDATE users SET role = 'poweruser' WHERE role = 'annotator'")
 
 
 def get_user(con: duckdb.DuckDBPyConnection, username: str) -> Optional[dict]:
@@ -158,12 +171,21 @@ def create_user(
     con: duckdb.DuckDBPyConnection,
     username: str,
     password: str,
-    role: Role = "annotator",
+    role: Role = "poweruser",
 ) -> UserRow:
     """Add a user. Raises ValueError on a bad name, an unknown role or a
     collision — the API maps that to 400."""
     if not valid_username(username):
         raise ValueError("username must be 1-32 chars of letters, digits, _ . or -")
+    if role == "annotator":
+        # The pre-rename name of the labeling role (SPEC section 2, amended in
+        # ensure_user_table). Rejected with the fix spelled out, because an
+        # operator following an old runbook will type it, and the generic
+        # "role must be one of (...)" would not say what happened to it.
+        raise ValueError(
+            "role 'annotator' has been renamed to 'poweruser' — create this "
+            "user with role 'poweruser'"
+        )
     if role not in ROLES:
         raise ValueError(f"role must be one of {ROLES}")
     if user_exists(con, username):

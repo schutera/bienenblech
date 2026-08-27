@@ -75,7 +75,7 @@ export function fitTransform(
  * Zoom by `factor` about a fixed screen point.
  *
  * WHY the extra algebra: the image point currently under the cursor must not
- * move, otherwise the view slides away from whatever the annotator was aiming
+ * move, otherwise the view slides away from whatever the labeler was aiming
  * at. Solve `screen = img * scale + t` for `t` at the new scale with `img` and
  * `screen` held fixed:  `t' = screen - img * scale'`.
  */
@@ -97,7 +97,7 @@ export function zoomAt(
  * Keep the image from being flung entirely out of the viewport.
  *
  * The rule is deliberately loose rather than "the image must cover the
- * container": annotators need to drag a crop edge towards the middle of the
+ * container": labelers need to drag a crop edge towards the middle of the
  * screen to work comfortably on instances clipped by the tile boundary. So the
  * only invariant is that at least `minVisible` px of the image stay inside the
  * container on each axis (or the whole of it, if it is smaller than that).
@@ -165,7 +165,7 @@ export function polygonArea(poly: readonly Point[]): number {
 
 /**
  * Area centroid, falling back to the vertex mean for degenerate (zero-area)
- * rings — an annotator can and will produce a collapsed polygon, and a NaN
+ * rings — a labeler can and will produce a collapsed polygon, and a NaN
  * label position would take the whole overlay down with it.
  */
 export function polygonCentroid(poly: readonly Point[]): Point {

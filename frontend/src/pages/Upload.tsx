@@ -1,5 +1,9 @@
 /**
- * Upload (admin). One frame at a time on the wire, several queued in the UI.
+ * Upload. One frame at a time on the wire, several queued in the UI.
+ *
+ * Open to every signed-in user, not only admins — the poweruser role exists so
+ * the people labeling can also feed the queue (this amends SPEC section 2; the
+ * route gate lives in App.tsx and the server enforces it on POST /api/images).
  *
  * Each file gets its own request so each file gets its own honest progress bar —
  * a 200 MB frame behind a single aggregate percentage is exactly the case where
@@ -15,9 +19,9 @@
  * The clean one is the case nobody thinks to photograph, because it looks like
  * a photograph of nothing — so the ask is made twice, once as standing
  * instruction above the drop zone and once as a prompt after an upload lands,
- * at the moment the sheet is still in the beekeeper's hands and cleaning it is
- * the next thing they will do. A nudge that arrives after the tray is back
- * under the hive is a nudge that costs another trip out to the hives.
+ * at the moment the sheet is still in the uploader's hands and cleaning it is
+ * the next thing they will do. A nudge that arrives after the sheet is back in
+ * service is a nudge that costs another collection trip.
  */
 
 import { useRef, useState } from "react";
@@ -141,7 +145,7 @@ export default function Upload() {
           Each frame is tiled into 640-pixel crops, the size YOLO11-seg trains on.
           That size is not a performance detail: segmentation training treats every
           unlabeled instance as background, so a half-labeled frame actively teaches
-          the model to ignore real bees. Exhaustively labeling a 4000x3000 frame in
+          the model to ignore real instances. Exhaustively labeling a 4000x3000 frame in
           one sitting is not realistic; exhaustively labeling one 640-pixel crop is.
           So the crop is the unit of work, and only crops marked done are exported.
         </p>
@@ -150,7 +154,7 @@ export default function Upload() {
       <Card className="p-5">
         <SectionLabel>Photograph every sheet twice</SectionLabel>
         <p className="text-[13px] text-gray-mid mt-2">
-          Once as it comes out from under the hive, debris and all. Then clean it
+          Once as it comes out, debris and all. Then clean it
           and photograph it again, empty, before it goes back in — same sheet,
           same light, nothing on it.
         </p>

@@ -8,8 +8,8 @@ Two decisions in here are load-bearing and must not be quietly relaxed.
     back* into the image (`x = width - size`) rather than *shrunk*. A shrunk
     edge tile would make the exported YOLO-seg dataset heterogeneous: the
     trainer letterboxes odd-sized images, which changes the effective object
-    scale for exactly the tiles at the frame border, and the annotator's canvas
-    would change size between crops for no reason the annotator can see. The
+    scale for exactly the tiles at the frame border, and the user's canvas
+    would change size between crops for no reason the user can see. The
     price is that the last row/column overlaps its neighbour; overlap is
     harmless (a duplicated instance is still a correctly labeled instance),
     missing coverage is not.
@@ -46,7 +46,7 @@ MAX_POINTS = 10_000
 # overlap 0, max_edge 8000) the worst case is 13x13 = 169 tiles, so this only
 # ever fires on a misconfiguration - a small `crop.size` with a large
 # `crop.overlap` turns an ordinary frame into millions of crop rows, which is a
-# hung upload and a DB full of work no annotator will ever finish.
+# hung upload and a DB full of work no user will ever finish.
 MAX_TILES = 10_000
 
 
@@ -72,7 +72,7 @@ def _axis_starts(extent: int, size: int, stride: int, min_edge: int) -> list[int
 
     `min_edge` only ever *removes* a tile, and only when removing it changes no
     pixel's coverage: with a large overlap the shifted-back final tile can
-    swallow its neighbour whole, and emitting both would hand the annotator two
+    swallow its neighbour whole, and emitting both would hand the user two
     near-identical crops to label. A tile is dropped only if the tiles either
     side of it still meet (`starts[i + 1] <= starts[i - 1] + size`), so coverage
     stays total by construction.
@@ -156,7 +156,7 @@ def render_crop(config: Config, image_row: Mapping[str, Any],
 
     The cache is a pure derivative of (stored image, crop rect) and both are
     immutable once written, so a cached file at least as new as its source is
-    served untouched. Written temp-file-then-`os.replace` because two annotators
+    served untouched. Written temp-file-then-`os.replace` because two users
     can open the same crop in the same instant: a half-written JPEG served to one
     of them would look like a corrupt image, not like a race.
     """
@@ -222,7 +222,7 @@ def to_source(points: Any, crop: Mapping[str, Any]) -> list[list[float]]:
 
     Every vertex is clamped into the crop rect first. An instance clipped by a
     tile edge is correct and expected for YOLO-seg training; a vertex a few
-    pixels outside the canvas (the annotator dragged past the edge) must not be
+    pixels outside the canvas (the user dragged past the edge) must not be
     stored as if it described pixels of the neighbouring tile.
 
     Clamping is also what makes the round-trip *idempotent* rather than merely
@@ -250,7 +250,7 @@ def validate_points(points: Any, crop: Mapping[str, Any]) -> list[list[float]]:
     yield NaN rather than failing.
 
     Self-intersecting polygons are accepted on purpose (SPEC section 3):
-    annotators draw them and the exporter does not care.
+    users draw them and the exporter does not care.
     """
     if int(crop["w"]) <= 0 or int(crop["h"]) <= 0:
         raise ValueError("crop has no area")
