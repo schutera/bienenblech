@@ -1,0 +1,66 @@
+# Bienenblech production stack: the app (uvicorn) behind Caddy (auto-HTTPS proxy).
+#
+#   1. cp .env.example .env         # then fill in the secrets
+#   2. docker compose up -d --build
+#
+# The app itself is NOT published to the host — all traffic goes through Caddy on
+# 80/443. If this box already runs another stack on 80/443 (cownting), use the
+# co-tenancy override instead, which drops Caddy and publishes the app on
+# 127.0.0.1 for that proxy to reach:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.shared.yml up -d
+
+services:
+  bienenblech:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bienenblech:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Session-cookie signing key + first-boot admin creds (see .env.example).
+      # `:?` here is deliberate: booting without these is never what you meant —
+      # an empty secret silently invalidates every session on restart, and an
+      # empty admin password would bootstrap a login anyone can guess.
+      BIENENBLECH_SECRET: ${BIENENBLECH_SECRET:?set BIENENBLECH_SECRET in .env}
+      BIENENBLECH_ADMIN_USER: ${BIENENBLECH_ADMIN_USER:-admin}
+      BIENENBLECH_ADMIN_PASSWORD: ${BIENENBLECH_ADMIN_PASSWORD:?set BIENENBLECH_ADMIN_PASSWORD in .env}
+      # BIENENBLECH_DISCORD_WEBHOOK is deliberately NOT listed here. `env_file`
+      # already injects it when it is set, and an unset webhook is a supported
+      # state (the backup still zips and rotates locally, it just posts nothing).
+      # Adding it as ${BIENENBLECH_DISCORD_WEBHOOK:?...} would turn that
+      # supported state into a hard boot failure; adding it without `:?` would
+      # be a no-op line. Either way it does not belong in this block.
+    volumes:
+      # DuckDB, source images, the crop cache and the backup zips all live under
+      # data/, so this one bind mount is the entire persistent state.
+      - ./data:/app/data
+      # Edit the prod config on the host without rebuilding the image. Read-only:
+      # config/ is committed, and secrets are read from the environment, never
+      # from YAML.
+      - ./config/bienenblech.prod.yaml:/app/config/bienenblech.prod.yaml:ro
+    expose:
+      - "8000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - bienenblech
+    environment:
+      # A domain (bienenblech.schutera.com) -> automatic HTTPS. ":80" -> plain HTTP.
+      CADDY_SITE_ADDRESS: ${CADDY_SITE_ADDRESS:-:80}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Issued certificates live here — losing this volume means re-issuing from
+      # Let's Encrypt on every boot, which is rate-limited.
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,41 @@
+# Keep the build context small and reproducible. The image builds the frontend
+# itself from frontend/ + the lockfile, so nothing pre-built or machine-specific
+# below should be shipped into the context.
+
+# --- VCS / CI / IDE / OS ---
+.git
+.gitignore
+.github
+.idea
+.vscode
+.DS_Store
+
+# --- Python envs & caches ---
+.venv
+venv
+**/__pycache__
+**/*.pyc
+*.egg-info
+build/
+
+# --- Persistent state: bind-mounted at /app/data at runtime, never baked in ---
+data/
+*.duckdb
+*.duckdb.wal
+
+# --- Frontend: source is copied in, but node_modules/dist are rebuilt in-image ---
+frontend/node_modules
+frontend/dist
+frontend/.vite
+
+# --- Local machine config & secrets (prod config is config/bienenblech.prod.yaml,
+# --- and it is bind-mounted read-only anyway) ---
+config/bienenblech.yaml
+.env
+.env.example
+
+# --- Not needed at runtime: the container runs `serve`, never the suite, and
+# --- nothing in the image reads the docs. ---
+tests/
+docs/
+*.md

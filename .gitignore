@@ -1,0 +1,33 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.egg-info/
+/build/
+/dist/
+.venv/
+venv/
+.env
+
+# --- IDE / OS ---
+.DS_Store
+.idea/
+.vscode/
+
+# --- All persistent state lives under data/ and is never committed: the DuckDB
+# --- store, the uploaded source images, the crop cache and the backup zips.
+data/
+*.duckdb
+*.duckdb.wal
+*.duckdb.tmp/
+
+# --- Frontend (built in the image / by `npm run build`) ---
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# --- Local, machine-specific config. config/bienenblech.example.yaml and
+# --- config/bienenblech.prod.yaml stay tracked; the working copy does not.
+config/bienenblech.yaml
+
+# --- Deployment-local: kept on the host, never committed ---
+docker-compose.override.yml

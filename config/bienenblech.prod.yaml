@@ -1,0 +1,53 @@
+# bienenblech — container / production configuration.
+#
+# Mounted read-only at /app/config and selected with BIENENBLECH_CONFIG (or by
+# copying it to config/bienenblech.yaml in the image). Differs from the example
+# in exactly two places, both marked PROD below.
+#
+# NO SECRETS IN HERE. This directory is committed and bind-mounted read-only.
+# The session secret, the bootstrap admin credentials and the Discord webhook are
+# read from the environment at the point of use:
+#   BIENENBLECH_SECRET, BIENENBLECH_ADMIN_USER, BIENENBLECH_ADMIN_PASSWORD,
+#   BIENENBLECH_DISCORD_WEBHOOK
+# BIENENBLECH_DISCORD_WEBHOOK being unset is a supported state: backups are still
+# zipped and still rotated locally, they are just not posted anywhere.
+#
+# The paths stay relative to /app, so everything the app writes lands inside the
+# single ./data bind mount. Do not point any of them outside it — that state
+# survives no redeploy and lands in no backup.
+
+project: bienenblech
+paths:
+  db_path: data/bienenblech.duckdb
+  images_dir: data/images
+  cache_dir: data/cache
+  backups_dir: data/backups
+upload:
+  max_mb: 200                 # per file
+  allowed: [".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"]
+  store_format: jpeg          # the derivative written to images_dir
+  store_quality: 92           # high: this IS the archival copy, masks refer to it
+  max_edge: 8000              # downscale only if larger; masks are stored against
+                              # the DERIVATIVE, so this must never change later
+crop:
+  size: 640                   # YOLO-seg native tile
+  overlap: 0.0                # fraction; 0 = clean partition
+  min_edge: 160               # edge tiles smaller than this are shifted back to
+                              # full size rather than emitted undersized
+  jpeg_quality: 92
+auth:
+  https_only: true            # PROD: Caddy terminates TLS, so the session cookie
+                              # is Secure. Leaving this false behind the real
+                              # domain ships a cookie over plain HTTP; setting it
+                              # true on plain HTTP means the browser never sends
+                              # the cookie back, i.e. an endless login loop.
+  session_days: 14
+backup:
+  enabled: true               # PROD: the zip carries the stored images as well as
+                              # the labels, so this is the only recoverable copy
+                              # of the annotator hours on the box.
+  interval_days: 7
+  keep: 8
+  max_upload_mb: 8            # Discord's unboosted per-file cap; a larger zip is
+                              # still written and rotated locally, and only a text
+                              # summary naming the path is posted.

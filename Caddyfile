@@ -1,0 +1,23 @@
+# Reverse proxy for Bienenblech.
+#
+# CADDY_SITE_ADDRESS (from .env) decides the mode:
+#   - a domain, e.g. bienenblech.schutera.com -> automatic HTTPS (Let's Encrypt)
+#   - ":80"                                  -> plain HTTP (testing / behind another proxy)
+#
+# This file is only used by the bundled Caddy in docker-compose.yml. In the
+# co-tenancy setup (docker-compose.shared.yml) that Caddy does not run at all and
+# the equivalent site block lives in the other stack's Caddyfile — see DEPLOY.md.
+
+{$CADDY_SITE_ADDRESS} {
+	# Uploads are still-frames, not video: a 4000x3000 JPEG is a few MB, and the
+	# upload endpoint accepts several files per request. 512 MB is a generous
+	# envelope for a multi-file post while still being a real ceiling — the app
+	# enforces the actual per-file limit (upload.max_mb, default 200) and answers
+	# 413 itself. Deliberately not cownting's 10 GB: nothing here is a video.
+	request_body {
+		max_size 512MB
+	}
+
+	encode zstd gzip
+	reverse_proxy bienenblech:8000
+}

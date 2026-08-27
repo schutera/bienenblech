@@ -1,0 +1,57 @@
+name: tests
+
+# The container image ships neither tests/ nor the test extras, so CI is the only
+# gate between a push and production. It runs both halves of the app: the Python
+# suite and a real frontend typecheck + production build, because a SPA that
+# fails to compile is a blank page in prod, not a red test.
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # Installing the project itself (not just `-r requirements.txt`) also
+      # proves pyproject.toml is valid and that bienenblech/ is importable the
+      # way the tests import it.
+      - name: Install the package + test extras
+        run: pip install -e ".[test]"
+
+      - name: Run tests
+        run: pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # `npm ci` (not install) for the same reason the Dockerfile uses it: the
+      # build must resolve to exactly the committed lockfile.
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # vite build is the same command the Dockerfile's stage 1 runs.
+      - name: Build
+        run: npm run build

@@ -1,0 +1,39 @@
+# bienenblech — example configuration.
+#
+# Copy to config/bienenblech.yaml and edit; that copy is gitignored and is what
+# the app loads first. Every key below is OPTIONAL and shown at its default, so
+# a file with only the keys you actually change is valid — as is no file at all.
+#
+# NO SECRETS IN HERE. This directory is committed and bind-mounted read-only into
+# the container. The session secret, the bootstrap admin credentials and the
+# Discord webhook are read from the environment at the point of use:
+#   BIENENBLECH_SECRET, BIENENBLECH_ADMIN_USER, BIENENBLECH_ADMIN_PASSWORD,
+#   BIENENBLECH_DISCORD_WEBHOOK
+
+project: bienenblech
+paths:
+  db_path: data/bienenblech.duckdb
+  images_dir: data/images
+  cache_dir: data/cache
+  backups_dir: data/backups
+upload:
+  max_mb: 200                 # per file
+  allowed: [".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"]
+  store_format: jpeg          # the derivative written to images_dir
+  store_quality: 92           # high: this IS the archival copy, masks refer to it
+  max_edge: 8000              # downscale only if larger; masks are stored against
+                              # the DERIVATIVE, so this must never change later
+crop:
+  size: 640                   # YOLO-seg native tile
+  overlap: 0.0                # fraction; 0 = clean partition
+  min_edge: 160               # edge tiles smaller than this are shifted back to
+                              # full size rather than emitted undersized
+  jpeg_quality: 92
+auth:
+  https_only: false           # true behind the real domain
+  session_days: 14
+backup:
+  enabled: true
+  interval_days: 7
+  keep: 8
+  max_upload_mb: 8

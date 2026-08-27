@@ -1,0 +1,33 @@
+# Co-tenancy override: bienenblech next to another stack that already owns
+# :80/:443 on this host (cownting). Used as an overlay on the base file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.shared.yml up -d
+#
+# Two changes, and only two:
+#
+# 1. The bundled Caddy is switched off. Compose merges files, it never deletes a
+#    service — so the only way to "remove" caddy from an override is to make it
+#    unselectable. Assigning it a profile does exactly that: a service that has
+#    any profile is skipped unless that profile is explicitly enabled (--profile
+#    / COMPOSE_PROFILES), and nothing enables `standalone-only`. Verified:
+#    `docker compose -f docker-compose.yml -f docker-compose.shared.yml config`
+#    resolves to the bienenblech service alone, caddy and the caddy_* volumes
+#    gone from the model — while the base file on its own still has no profiles
+#    at all, so plain `docker compose up -d` keeps starting both services.
+#    (`deploy.replicas: 0` and `--scale caddy=0` also stop the container, but
+#    both leave caddy in the config and the second one has to be remembered on
+#    every single command. The profile is declarative and lives in this file.)
+#
+# 2. The app is published on the loopback interface so the OTHER stack's proxy
+#    can reach it. 127.0.0.1 and not 0.0.0.0: this port has no TLS and no rate
+#    limiting in front of it, so it must not be reachable from the network.
+#    See DEPLOY.md for the Caddyfile site block to paste into cownting's Caddyfile.
+
+services:
+  caddy:
+    profiles:
+      - standalone-only
+
+  bienenblech:
+    ports:
+      - "127.0.0.1:${BIENENBLECH_PORT:-8001}:8000"

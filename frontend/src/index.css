@@ -1,0 +1,88 @@
+@import "tailwindcss";
+
+/* ---- design tokens (warm & approachable) ---- */
+@theme {
+  --font-display: 'EB Garamond', Palatino, "Book Antiqua", Georgia, serif;
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, monospace;
+
+  /* surfaces */
+  --color-bg: #f7f4ee;          /* warm paper */
+  --color-surface: #ffffff;     /* cards */
+  --color-surface-sunk: #f1ede3;/* inset wells (split bars, tracks) */
+  --color-border: #e7e0d2;      /* soft warm hairline */
+
+  /* brand */
+  --color-accent: #5f8b6a;      /* sage green */
+  --color-accent-deep: #3f6b50; /* text-on-light green */
+  --color-accent-soft: #e8efe6; /* tinted green wash */
+
+  /* text (semantic names kept for backwards compat) */
+  --color-near-black: #2b2a26;  /* headings / hero numbers */
+  --color-text: #57534c;        /* body */
+  --color-gray-mid: #7c766c;    /* secondary */
+  --color-gray-tertiary: #9a948a;/* muted labels / units */
+
+  /* heat ramp (occupancy heatmap) */
+  --color-heat: #e58a3c;        /* warm amber */
+  --color-heat-hot: #d5513a;    /* terracotta */
+  --color-warn: #d98236;        /* nudges / attention */
+  --color-danger: #b4523f;      /* a refusal, not a nudge: a failed submit, a crop
+                                   the server would not serve, a destructive
+                                   confirm. Deliberately distinct from --color-warn
+                                   so an advisory and a dead end never look alike. */
+
+  --animate-fade-slide-in: fade-slide-in 0.6s ease-out both;
+  --animate-shimmer: shimmer 1.8s ease-in-out infinite;
+}
+
+@keyframes fade-slide-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes shimmer {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+
+/* ---- base ---- */
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  line-height: 1.6;
+  font-feature-settings: "kern" 1, "liga" 1, "calt" 1;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+::selection { background: #5f8b6a33; }
+
+/* Keyboard users must be able to see where they are: the Label screen binds
+   1..9 and a stray focus ring is the only clue that focus sits in a field and
+   the digits are being typed rather than selecting a class. */
+:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+
+/* soft, seamless default corners; individual components can override */
+:root { --radius: 14px; }
+
+/* Height of the sticky app header (App.tsx: 40px mark + py-4 + 1px border).
+   Page-level sticky toolbars offset by this so they park just under it — the
+   Label screen's CropProgress bar depends on it, because the completeness rule
+   it carries must never scroll out of view. */
+:root { --app-header-h: 73px; }
+
+/* ---- why there is NO dark labeling surface here ----
+   cownting darkens its Label route because its annotator judges how brightly lit
+   a cow is, and a near-white card wrapped around the photograph biases the exact
+   perceptual judgement being asked for. This app asks a different question:
+   trace the boundary of every instance. Boundary tracing is a spatial judgement,
+   not a photometric one, and the surround does not shift it. Meanwhile this
+   screen carries a paragraph of standing instruction (the completeness rule),
+   the class list and two terminal actions in text the annotator re-reads on
+   every single crop — all more legible, and consistent with the other five
+   routes, on warm paper. So there is no [data-surface="label"] block here and no
+   second palette to keep in sync: the app is light throughout, and the canvas
+   paints its own sunken backdrop behind the crop. */

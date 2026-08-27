@@ -1,0 +1,17 @@
+# Bienenblech runtime dependencies — deliberately short.
+#
+# This tool labels images; it never runs a model. No torch, no ultralytics, no
+# opencv, no ffmpeg bindings, and no numpy (nothing here does array math: Pillow
+# crops the tiles, the YOLO-seg exporter writes polygon coordinates as text).
+# Keeping this list short is what keeps the image at a few hundred MB and the
+# cold-start at seconds. Think twice before adding a line.
+
+fastapi>=0.115            # the /api surface, and it serves the built SPA at /
+uvicorn[standard]>=0.30   # ASGI server (`bienenblech serve`)
+duckdb>=1.0               # embedded store: data/bienenblech.duckdb
+pillow>=10.0              # decode uploads, write the JPEG derivative, cut crops
+pydantic>=2.6             # request/response models + the typed config objects
+pyyaml>=6.0               # config/bienenblech*.yaml
+typer>=0.12               # the CLI (`python -m bienenblech.cli`)
+python-multipart>=0.0.9   # required for the multipart image upload endpoint
+itsdangerous>=2.2         # signs the session cookie (starlette SessionMiddleware)
