@@ -166,8 +166,8 @@ export type UploadResult = {
  * XHR rather than fetch purely for `upload.onprogress`: fetch still cannot
  * report request-body progress in any browser we target, and a 200 MB frame
  * (config `upload.max_mb`) uploading with no feedback is indistinguishable from
- * a hang. `onProgress` receives 0..1 for THIS call, so the Upload page sends one
- * file per call to get honest per-file bars.
+ * a hang. `onProgress` receives 0..1 for THIS call, so the uploader on the
+ * Overview sends one file per call to get honest per-file bars.
  *
  * Cookies ride along by default on a same-origin XHR, which is what
  * `credentials: "same-origin"` means for the fetch paths above — so

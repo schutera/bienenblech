@@ -1,7 +1,6 @@
 import { BrowserRouter, Navigate, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { AuthProvider, RequireAdmin, RequireAuth, useAuth } from "./lib/auth";
 import Home from "./pages/Home";
-import Upload from "./pages/Upload";
 import Label from "./pages/Label";
 import Admin from "./pages/Admin";
 import Login from "./pages/Login";
@@ -88,12 +87,6 @@ function Shell() {
             <NavLink to="/label" className={navClass}>
               Label
             </NavLink>
-            {/* Upload is open to every signed-in account (amends SPEC section 2):
-                the poweruser role carries the upload right, and every account is
-                admin or poweruser. Deleting a frame stays admin-only. */}
-            <NavLink to="/upload" className={navClass}>
-              Upload
-            </NavLink>
             {isAdmin ? (
               <NavLink to="/admin" className={navClass}>
                 Admin
@@ -106,14 +99,12 @@ function Shell() {
       <main className={mainCls}>
         <Routes>
           <Route path="/" element={<Home />} />
-          {/* No admin gate: uploading is a poweruser right, and every signed-in
-              account is admin or poweruser, so the route is open to anyone who
-              got past RequireAuth. The server enforces the same rule. */}
-          <Route path="/upload" element={<Upload />} />
           <Route path="/label" element={<Label />} />
           <Route path="/label/:cropId" element={<Label />} />
-          {/* The Images and Classes pages folded into Overview and Admin; stale
-              bookmarks and old links land on the Overview rather than a 404. */}
+          {/* The Images, Classes and Upload pages folded into Overview and
+              Admin; stale bookmarks and old links land on the Overview rather
+              than a 404. */}
+          <Route path="/upload" element={<Navigate to="/" replace />} />
           <Route path="/images" element={<Navigate to="/" replace />} />
           <Route path="/classes" element={<Navigate to="/" replace />} />
           <Route path="/classes/*" element={<Navigate to="/" replace />} />

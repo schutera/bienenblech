@@ -376,8 +376,8 @@ export default function Label() {
         {error ? <ErrorNote className="mb-6" onDismiss={() => setError(null)}>{error}</ErrorNote> : null}
         <EmptyState
           title="No open crops left"
-          body="Every crop is marked done or empty. Upload another frame, or reopen a crop from its frame's grid on the Overview."
-          action={<Button onClick={() => navigate("/upload")}>Upload a frame</Button>}
+          body="Every crop is marked done or empty. Upload the next frame on the Overview, or reopen a crop from its frame grid there."
+          action={<Button onClick={() => navigate("/")}>Go to Overview</Button>}
         />
       </div>
     );
