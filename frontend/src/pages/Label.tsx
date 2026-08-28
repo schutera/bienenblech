@@ -23,7 +23,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import type { CropTask, LabelClass, Mask } from "../lib/types";
 import {
   completeCrop,
@@ -33,6 +33,7 @@ import {
   deleteMask,
   errorMessage,
   getCrop,
+  imageFileUrl,
   listClasses,
   nextCrop,
   reopenCrop,
@@ -71,6 +72,7 @@ export default function Label() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [noneLeft, setNoneLeft] = useState(false);
+  const [showFrame, setShowFrame] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // The crop already in state, so advancing to the next one does not re-fetch it
@@ -521,11 +523,6 @@ export default function Label() {
                       : "This crop has polygons. Delete them first if it is genuinely empty."}
                   </p>
                 </div>
-                <p className="text-[12px] text-gray-tertiary border-t border-border pt-3">
-                  Not sure? Leave it. There is no skip button — leaving a crop
-                  open is the skip: it stays in the queue and nothing is exported
-                  from it.
-                </p>
               </div>
             )}
           </Card>
@@ -537,12 +534,34 @@ export default function Label() {
               Crop {crop.row_idx + 1}·{crop.col_idx + 1} — {crop.w}x{crop.h} px at ({crop.x}, {crop.y})
               in a {task.image.width}x{task.image.height} frame.
             </p>
-            <Link
-              to="/"
+            <button
+              type="button"
+              onClick={() => setShowFrame((v) => !v)}
               className="text-[13px] text-accent hover:text-accent-deep transition-colors inline-block mt-2"
             >
-              See the whole frame
-            </Link>
+              {showFrame ? "Hide the whole frame" : "See the whole frame"}
+            </button>
+            {showFrame ? (
+              /* The frame inline, with this crop outlined — a map, not a
+                 navigation. The rectangle is percentage-positioned so it
+                 survives any rendered size. */
+              <div className="relative mt-2 rounded-md overflow-hidden border border-border">
+                <img
+                  src={imageFileUrl(task.image.image_id)}
+                  alt={task.image.filename}
+                  className="block w-full h-auto"
+                />
+                <div
+                  className="absolute border-2 border-accent pointer-events-none"
+                  style={{
+                    left: `${(crop.x / task.image.width) * 100}%`,
+                    top: `${(crop.y / task.image.height) * 100}%`,
+                    width: `${(crop.w / task.image.width) * 100}%`,
+                    height: `${(crop.h / task.image.height) * 100}%`,
+                  }}
+                />
+              </div>
+            ) : null}
           </Card>
         </aside>
       </div>
