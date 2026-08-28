@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -386,6 +386,21 @@ def _file_etag(path: Path) -> tuple[str, dict[str, str]]:
     return etag, {"ETag": etag, "Cache-Control": IMMUTABLE_CACHE}
 
 
+def _form_bool(value: str | None, field: str = "is_empty") -> bool:
+    """A boolean out of a multipart form field, where booleans arrive as
+    strings (the frontend's FormData sends "true"/"false"). Absent means false.
+    An unrecognisable value is a 400 via the ValueError handler, not a silent
+    false - a garbled true must not quietly queue N crops of nothing."""
+    if value is None:
+        return False
+    v = str(value).strip().lower()
+    if v in ("true", "1", "yes", "on"):
+        return True
+    if v in ("", "false", "0", "no", "off"):
+        return False
+    raise ValueError(f"{field} must be true or false, got {value!r}")
+
+
 # ------------------------------------------------------------------ app factory
 def create_app(config: Config | None = None) -> FastAPI:
     """Build the application. Also the uvicorn factory target (see cli.serve)."""
@@ -536,9 +551,22 @@ def create_app(config: Config | None = None) -> FastAPI:
     # ------------------------------------------------------------------ images
     @app.post("/api/images")
     def upload_images(file: list[UploadFile] = File(...),
+                      is_empty: str | None = Form(None),
                       user: dict = Depends(current_user),
                       con: Any = Depends(get_con)):
         """Land one or more frames and tile each of them.
+
+        `is_empty` (optional form field, default false) applies to every file
+        in the request - the frontend sends one file per request for honest
+        progress bars, so that is per-file control in practice. WHY it exists:
+        the second photo of every sheet is the cleaned, empty one, and making
+        the uploader assert emptiness once beats making someone click through
+        N crops of nothing. The crops of an empty-marked frame are born done +
+        empty, attributed to the uploader, so the export gains real negative
+        samples (0-byte label files) with zero labeling work. Dedupe rule: the
+        flag never touches an existing frame - a sha256 match still answers
+        "duplicate, nothing was changed", and that stays true whatever
+        `is_empty` says.
 
         Open to any signed-in user, not just admins — an amendment to SPEC
         section 2, recorded here because the SPEC is frozen (section 11).
@@ -558,6 +586,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         """
         if not file:
             raise HTTPException(400, "no files uploaded")
+        empty = _form_bool(is_empty)    # parsed before any write, like the checks below
         limit = int(config.upload.max_mb) * 1024 * 1024
         allowed = {str(e).lower() for e in config.upload.allowed}
         for up in file:
@@ -578,6 +607,7 @@ def create_app(config: Config | None = None) -> FastAPI:
                 filename=up.filename or "upload.jpg",
                 data=up.file.read(),
                 username=user["username"],
+                is_empty=empty,
             )
             (duplicates if is_duplicate else stored).append(uploads.image_summary(row))
         return {"images": stored, "duplicates": duplicates}

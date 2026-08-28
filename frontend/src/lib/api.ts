@@ -172,14 +172,22 @@ export type UploadResult = {
  * Cookies ride along by default on a same-origin XHR, which is what
  * `credentials: "same-origin"` means for the fetch paths above — so
  * `withCredentials` is deliberately left off.
+ *
+ * `isEmpty` sends the optional form field `is_empty=true`: the uploader asserts
+ * every sheet in THIS call is clean, so its crops are born done (no polygons,
+ * attributed to the uploader), never enter the queue, and export as negatives.
+ * The flag applies to the whole request — one more reason for one file per
+ * call. On a sha256 duplicate the flag is ignored; nothing is changed.
  */
 export function uploadImages(
   files: File[],
   onProgress?: (fraction: number) => void,
+  isEmpty = false,
 ): Promise<UploadResult> {
   return new Promise<UploadResult>((resolve, reject) => {
     const form = new FormData();
     for (const f of files) form.append("file", f, f.name);
+    if (isEmpty) form.append("is_empty", "true");
 
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `${BASE}/images`);

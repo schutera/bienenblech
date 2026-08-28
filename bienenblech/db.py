@@ -616,6 +616,21 @@ def next_open_crop(
     ))
 
 
+# The one UPDATE that changes a crop's completion state - shared by the
+# per-crop path (complete/reopen) and the whole-frame empty-upload path, so the
+# columns that make up "done" are defined exactly once.
+_SET_CROP_STATUS = (
+    "UPDATE crops SET status = ?, is_empty = ?, "
+    "completed_by = CASE WHEN ? THEN ? ELSE NULL END, "
+    "completed_at = CASE WHEN ? THEN now() ELSE NULL END "
+)
+
+
+def _crop_status_params(status: str, is_empty: bool, actor: str | None) -> list[Any]:
+    done = status == "done"
+    return [status, bool(is_empty), done, actor, done]
+
+
 def set_crop_status(
     con: duckdb.DuckDBPyConnection,
     crop_id: str,
@@ -636,17 +651,49 @@ def set_crop_status(
         raise ValueError(f"status must be one of {CROP_STATUSES}, got {status!r}")
     if get_crop(con, crop_id) is None:
         raise NotFound(f"unknown crop {crop_id!r}")
-    done = status == "done"
     con.execute(
-        "UPDATE crops SET status = ?, is_empty = ?, "
-        "completed_by = CASE WHEN ? THEN ? ELSE NULL END, "
-        "completed_at = CASE WHEN ? THEN now() ELSE NULL END "
-        "WHERE crop_id = ?",
-        [status, bool(is_empty), done, actor, done, crop_id],
+        _SET_CROP_STATUS + "WHERE crop_id = ?",
+        _crop_status_params(status, is_empty, actor) + [crop_id],
     )
     row = get_crop(con, crop_id)
     assert row is not None
     return row
+
+
+def complete_empty_crops(
+    con: duckdb.DuckDBPyConnection, image_id: str, *, actor: str | None
+) -> int:
+    """Mark every still-open crop of one frame done + empty, in one statement.
+
+    The seam for a sheet asserted empty at upload time: its crops are born
+    finished (`status='done'`, `is_empty=TRUE`, completed_by/completed_at
+    stamped), so they never enter the labeling queue and the export picks them
+    up as negative samples with zero labeling work. Same UPDATE as
+    `set_crop_status`, so 'done' can never mean two different sets of columns.
+    Returns the number of crops completed.
+
+    The section-1 invariant (a done+empty crop has no masks) holds here by
+    construction: the upload path calls this inside the transaction that just
+    inserted the crop rows, before COMMIT, so no other connection has ever seen
+    these crop ids and no mask can reference them - and DuckDB allows a single
+    writer per database besides, so nothing can race a mask in between. The
+    check below is a tripwire for any future caller that reaches for this on a
+    frame that already carries work; that path belongs to `set_crop_status`
+    behind the API's per-crop guards.
+    """
+    n_masks = con.execute(
+        "SELECT count(*) FROM masks WHERE image_id = ? AND NOT deleted", [image_id]
+    ).fetchone()[0]
+    if n_masks:
+        raise ValueError(
+            f"image {image_id!r} carries {n_masks} mask(s); refusing to complete "
+            "its crops as empty"
+        )
+    row = con.execute(
+        _SET_CROP_STATUS + "WHERE image_id = ? AND status = 'open'",
+        _crop_status_params("done", True, actor) + [image_id],
+    ).fetchone()
+    return int(row[0]) if row else 0
 
 
 # ----------------------------------------------------------------------- classes

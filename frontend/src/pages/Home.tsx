@@ -127,6 +127,9 @@ type Item = {
   progress: number;
   detail: string | null;
   image: ImageSummary | null;
+  /** Uploader's assertion that this sheet is clean — sent as is_empty with THIS
+   *  file's request. Its crops arrive done and never enter the queue. */
+  isEmpty: boolean;
 };
 
 const mb = (bytes: number) => `${(bytes / 1_048_576).toFixed(1)} MB`;
@@ -176,6 +179,7 @@ function UploadCard({ onAdded }: { onAdded: (im: ImageSummary) => void }) {
       progress: 0,
       detail: null,
       image: null,
+      isEmpty: false,
     }));
     setItems((cur) => [...cur, ...added]);
   }
@@ -195,7 +199,7 @@ function UploadCard({ onAdded }: { onAdded: (im: ImageSummary) => void }) {
     for (const it of queued) {
       patch(it.key, { status: "uploading", progress: 0, detail: null });
       try {
-        const res = await uploadImages([it.file], (f) => patch(it.key, { progress: f }));
+        const res = await uploadImages([it.file], (f) => patch(it.key, { progress: f }), it.isEmpty);
         const image = res.images?.[0] ?? null;
         const dup = res.duplicates?.[0];
         if (image) {
@@ -203,7 +207,9 @@ function UploadCard({ onAdded }: { onAdded: (im: ImageSummary) => void }) {
             status: "added",
             progress: 1,
             image,
-            detail: `${image.n_crops} crops of ${image.crop_size} px from a ${image.width}x${image.height} frame.`,
+            detail: it.isEmpty
+              ? `${image.n_crops} crops, all marked empty — negatives in the next export, nothing to label.`
+              : `${image.n_crops} crops of ${image.crop_size} px from a ${image.width}x${image.height} frame.`,
           });
           onAdded(image);
         } else if (dup) {
@@ -274,7 +280,8 @@ function UploadCard({ onAdded }: { onAdded: (im: ImageSummary) => void }) {
       <p className="text-[12px] text-gray-tertiary mt-3">
         Photograph each sheet twice: as collected, debris and all, then cleaned
         and empty — the empty one teaches the model that nothing is a valid
-        answer.
+        answer. Mark the cleaned photo Empty sheet: it skips labeling and
+        exports as negatives.
       </p>
 
       {items.length > 0 ? (
@@ -295,6 +302,18 @@ function UploadCard({ onAdded }: { onAdded: (im: ImageSummary) => void }) {
                   <span className="font-mono text-[11px] text-gray-mid tabular-nums">
                     {Math.round(it.progress * 100)}%
                   </span>
+                ) : null}
+                {it.status === "queued" || it.status === "failed" ? (
+                  <label className="flex items-center gap-1.5 text-[12px] text-gray-mid select-none cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={it.isEmpty}
+                      disabled={busy}
+                      onChange={(e) => patch(it.key, { isEmpty: e.target.checked })}
+                      className="accent-accent"
+                    />
+                    Empty sheet
+                  </label>
                 ) : null}
                 {it.status === "queued" && !busy ? (
                   <button
@@ -326,8 +345,8 @@ function UploadCard({ onAdded }: { onAdded: (im: ImageSummary) => void }) {
           <SectionLabel>Before that sheet goes back in</SectionLabel>
           <p className="text-[13px] text-gray-mid mt-2">
             {added.length === 1
-              ? "That sheet is in. Now clean it, photograph it empty, and upload that too — "
-              : `Those ${added.length} sheets are in. Now clean them, photograph them empty, and upload those too — `}
+              ? "That sheet is in. Now clean it, photograph it empty, and upload that too, marked Empty sheet — "
+              : `Those ${added.length} sheets are in. Now clean them, photograph them empty, and upload those too, marked Empty sheet — `}
             the half everyone forgets.
           </p>
         </div>
@@ -592,6 +611,11 @@ export default function Home() {
                             </span>
                             {im.n_done === im.n_crops && im.n_crops > 0 ? (
                               <Pill tone="accent">complete</Pill>
+                            ) : null}
+                            {/* Derived, no schema flag: every crop done and not
+                                one polygon means the sheet was empty. */}
+                            {im.n_crops > 0 && im.n_done === im.n_crops && im.n_masks === 0 ? (
+                              <Pill>empty</Pill>
                             ) : null}
                             <span className="ml-auto flex items-center gap-1">
                               <button

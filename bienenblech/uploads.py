@@ -119,12 +119,22 @@ def _write_derivative(config: Config, data: bytes, dest: Path) -> tuple[int, int
 
 
 def store_upload(config: Config, con: Any, *, filename: str, data: bytes,
-                 username: str | None) -> tuple[dict, bool]:
+                 username: str | None, is_empty: bool = False) -> tuple[dict, bool]:
     """Land one uploaded frame. Returns `(image_row, is_duplicate)`.
 
     On a duplicate nothing at all is written - not the file, not a row - and the
     existing image is returned, so the caller can tell the user which frame it
-    already was.
+    already was. That holds regardless of `is_empty`: the duplicate return sits
+    above the point where the flag is consulted, so an empty assertion on a
+    re-upload can never retro-complete an existing frame's crops - "nothing was
+    changed" stays true.
+
+    `is_empty` is the uploader asserting the sheet holds no instances: the frame
+    is stored and tiled exactly like any other, but every crop is born finished
+    (done + empty, attributed to `username`), inside the same transaction as the
+    tiling - so the frame is never observable half-completed and its crops never
+    enter the labeling queue. A mis-marked sheet stays recoverable per crop via
+    the reopen flow.
 
     Raises ValueError (-> 400) for an unsupported extension or an undecodable
     payload and UploadTooLarge (-> 413) for an oversized one.
@@ -193,6 +203,11 @@ def store_upload(config: Config, con: Any, *, filename: str, data: bytes,
             note=None,
         )
         db.insert_crops(con, crop_rows)
+        if is_empty:
+            # Fresh crop ids inside an uncommitted transaction: no mask can
+            # reference them yet, so the empty-with-masks guard (SPEC section 1)
+            # holds by construction - db.complete_empty_crops re-checks anyway.
+            db.complete_empty_crops(con, image_id, actor=username)
         con.execute("COMMIT")
     except BaseException:
         con.execute("ROLLBACK")
