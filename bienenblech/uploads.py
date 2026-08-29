@@ -79,8 +79,8 @@ def _store_suffix(config: Config) -> str:
     return ".jpg" if fmt in ("jpg", "jpeg") else f".{fmt}"
 
 
-def _write_derivative(config: Config, data: bytes, dest: Path) -> tuple[int, int, int]:
-    """Decode, normalise and store the archival derivative. Returns (w, h, bytes).
+def _decode_upload(data: bytes):
+    """Decode an uploaded payload and apply EXIF transpose. Returns a PIL image.
 
     EXIF transpose is applied *before* anything else: a phone frame stored
     without it would be labeled sideways relative to how it is displayed, and
@@ -93,10 +93,15 @@ def _write_derivative(config: Config, data: bytes, dest: Path) -> tuple[int, int
         im.load()
     except Exception as exc:      # noqa: BLE001 - Pillow raises a wide family here
         raise ValueError(f"not a readable image: {exc}") from exc
+    return ImageOps.exif_transpose(im) or im
 
-    im = ImageOps.exif_transpose(im) or im
-    if im.mode != "RGB":
-        im = im.convert("RGB")
+
+def _resize_to_max_edge(config: Config, im):
+    """Downscale to `upload.max_edge` with LANCZOS — the two one-time decisions
+    the module docstring pins. One implementation for every derivative writer,
+    so the age tool can never drift from Blech frames on what "stored size"
+    means."""
+    from PIL import Image
 
     max_edge = int(getattr(config.upload, "max_edge", 0) or 0)
     if max_edge > 0 and max(im.size) > max_edge:
@@ -105,17 +110,76 @@ def _write_derivative(config: Config, data: bytes, dest: Path) -> tuple[int, int
             (max(1, round(im.width * scale)), max(1, round(im.height * scale))),
             Image.LANCZOS,
         )
+    return im
 
+
+def _save_atomic(im, dest: Path, **save_kwargs) -> None:
+    """Encode into a sibling tempfile and `os.replace` into place, so a crash
+    mid-write never leaves a half-encoded file at a path a DB row could name."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(dest.parent), prefix=".", suffix=".tmp")
     os.close(fd)
     try:
-        im.save(tmp, format="JPEG", quality=int(config.upload.store_quality))
+        im.save(tmp, **save_kwargs)
         os.replace(tmp, dest)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+def _write_derivative(config: Config, data: bytes, dest: Path) -> tuple[int, int, int]:
+    """Decode, normalise and store the archival Blech derivative. Returns
+    (w, h, bytes). Blech frames are photographs of sticky sheets — opaque by
+    nature — so RGB + JPEG at `store_quality` is always right here; age
+    samples go through `write_age_derivative` below instead."""
+    im = _decode_upload(data)
+    if im.mode != "RGB":
+        im = im.convert("RGB")
+    im = _resize_to_max_edge(config, im)
+    _save_atomic(im, dest, format="JPEG", quality=int(config.upload.store_quality))
     return im.width, im.height, dest.stat().st_size
+
+
+def _has_alpha(im) -> bool:
+    """True when the decoded image carries transparency a JPEG would flatten:
+    an alpha band (RGBA/LA/PA) or a palette transparency entry."""
+    if im.mode in ("RGBA", "LA", "PA"):
+        return True
+    return im.mode == "P" and "transparency" in im.info
+
+
+def write_age_derivative(
+    config: Config, data: bytes, dest_stem: Path
+) -> tuple[int, int, int, Path]:
+    """Store an age-sample derivative at `dest_stem` + ".png"/".jpg". Returns
+    (w, h, bytes, dest) — the caller records `dest`, whose suffix names the
+    actual stored format.
+
+    WHY a second writer: Blech frames are photographs, and `_write_derivative`'s
+    JPEG is right for them. Age samples are instance-masked bee cutouts whose
+    alpha channel IS the masking — flattening it re-attaches the background the
+    masking removed, and the annotator would judge that background along with
+    the bee. So a source carrying alpha (RGBA, LA, or P with a transparency
+    entry) is stored as PNG with its alpha intact (canonicalised to RGBA); an
+    opaque source stores as JPEG exactly like a Blech frame. Decode/EXIF and
+    the max-edge/LANCZOS downscale are shared with `_write_derivative`, never
+    forked — the two tools must not drift on what a stored derivative is.
+    """
+    im = _decode_upload(data)
+    if _has_alpha(im):
+        if im.mode != "RGBA":
+            im = im.convert("RGBA")
+        im = _resize_to_max_edge(config, im)
+        dest = dest_stem.with_suffix(".png")
+        _save_atomic(im, dest, format="PNG")
+    else:
+        if im.mode != "RGB":
+            im = im.convert("RGB")
+        im = _resize_to_max_edge(config, im)
+        dest = dest_stem.with_suffix(".jpg")
+        _save_atomic(im, dest, format="JPEG",
+                     quality=int(config.upload.store_quality))
+    return im.width, im.height, dest.stat().st_size, dest
 
 
 def store_upload(config: Config, con: Any, *, filename: str, data: bytes,

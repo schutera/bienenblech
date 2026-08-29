@@ -62,7 +62,7 @@ function isTypingTarget(target: EventTarget | null): boolean {
 export default function Label() {
   const { cropId } = useParams<{ cropId?: string }>();
   const navigate = useNavigate();
-  const { me } = useAuth();
+  const { me, isAdmin } = useAuth();
 
   const [task, setTask] = useState<CropTask | null>(null);
   const [masks, setMasks] = useState<Mask[]>([]);
@@ -236,6 +236,16 @@ export default function Label() {
       if (readOnly) return;
       const idx = masks.findIndex((m) => m.mask_id === maskId);
       if (idx < 0) return;
+      // Author-or-admin, mirroring the server gate: deleting your own polygon
+      // is part of drawing; deleting someone else's is curation. Pre-checked
+      // here so the optimistic removal never has to roll back on a 403.
+      const target = masks[idx];
+      if (!isAdmin && target.created_by && me?.username && target.created_by !== me.username) {
+        setError(
+          `That polygon was drawn by ${target.created_by} — only its author or an admin can delete it.`,
+        );
+        return;
+      }
       if (isTemp(maskId)) {
         // Still being created: there is no server id to delete yet, and removing
         // it locally would leave a polygon on the server nobody can see.
@@ -252,7 +262,7 @@ export default function Label() {
         setError(`That polygon was not deleted — ${errorMessage(e)}`);
       }
     },
-    [masks, readOnly],
+    [masks, readOnly, isAdmin, me],
   );
 
   /**

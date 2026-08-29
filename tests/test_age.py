@@ -77,6 +77,30 @@ def bee_bytes(seed: int = 0, width: int = BEE_W, height: int = BEE_H) -> bytes:
     return buf.getvalue()
 
 
+def bee_cutout_bytes(seed: int = 0, width: int = BEE_W, height: int = BEE_H) -> bytes:
+    """What the masking pipeline actually produces: an RGBA PNG whose alpha IS
+    the instance mask — an opaque bee ellipse on a fully-transparent ground.
+    The upload path must store this as PNG with the alpha intact; flattening it
+    to JPEG would re-attach a background the masking removed."""
+    im = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(im)
+    cx, cy = width // 2 + (seed * 7) % 40, height // 2 + (seed * 5) % 30
+    draw.ellipse([cx - 70, cy - 35, cx + 70, cy + 35],
+                 fill=(212, 160, 60 + seed % 90, 255))
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def bee_jpeg_bytes(seed: int = 0) -> bytes:
+    """The same synthetic bee as `bee_bytes`, encoded as JPEG at the source —
+    an opaque upload, which must keep storing as JPEG exactly as before."""
+    im = Image.open(io.BytesIO(bee_bytes(seed))).convert("RGB")
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", quality=90)
+    return buf.getvalue()
+
+
 def _upload(client: TestClient, blobs: list[tuple[str, bytes]]):
     """POST the given (filename, bytes) pairs as one multipart request.
 
@@ -100,19 +124,24 @@ def _samples(client: TestClient, status: str | None = None) -> list[dict]:
     return rows
 
 
-def _upload_one(admin: TestClient, seed: int, name: str | None = None) -> str:
-    """Upload one bee and return its sample_id.
+def _upload_one_blob(admin: TestClient, name: str, blob: bytes) -> str:
+    """Upload one payload and return its sample_id.
 
     Ids are recovered by set difference against the list endpoint rather than
     parsed out of the upload answer, so these helpers do not double as a pin on
     the upload response shape — that pin lives in exactly one test below.
     """
     before = {r["sample_id"] for r in _samples(admin)}
-    resp = _upload(admin, [(name or f"bee{seed}.png", bee_bytes(seed))])
+    resp = _upload(admin, [(name, blob)])
     assert resp.status_code == 200, resp.text
     new = {r["sample_id"] for r in _samples(admin)} - before
     assert len(new) == 1, f"expected exactly one new sample, got {new}"
     return new.pop()
+
+
+def _upload_one(admin: TestClient, seed: int, name: str | None = None) -> str:
+    """Upload one opaque bee (RGB PNG source -> stored JPEG derivative)."""
+    return _upload_one_blob(admin, name or f"bee{seed}.png", bee_bytes(seed))
 
 
 def _next(client: TestClient) -> dict | None:
@@ -169,9 +198,10 @@ def trio(admin: TestClient) -> list[str]:
 def test_admin_upload_lands_open_samples_with_true_dims_and_bytes(
     admin: TestClient, query, tmp_path: Path
 ):
-    """Uploads are re-encoded like Blech frames: the stored file is the JPEG
-    derivative, and width/height/bytes describe THAT file — the pixels the
-    annotator will actually judge — not the upload."""
+    """Uploads are re-encoded like Blech frames: for an OPAQUE source the
+    stored file is the JPEG derivative, and width/height/bytes describe THAT
+    file — the pixels the annotator will actually judge — not the upload.
+    (Sources carrying alpha store as PNG instead; pinned further down.)"""
     resp = _upload(admin, [("bee_a.png", bee_bytes(101)),
                            ("bee_b.png", bee_bytes(102))])
     assert resp.status_code == 200, resp.text
@@ -190,7 +220,9 @@ def test_admin_upload_lands_open_samples_with_true_dims_and_bytes(
         assert tmp_path.resolve() in path.resolve().parents, (
             f"age sample stored at {path}, outside the test sandbox"
         )
-        assert path.suffix == ".jpg", "the derivative is JPEG, like Blech uploads"
+        assert path.suffix == ".jpg", (
+            "an opaque source stores as JPEG, like Blech uploads"
+        )
         assert path.is_file()
         assert stored["bytes"] == path.stat().st_size > 0
         assert row["bytes"] == stored["bytes"]

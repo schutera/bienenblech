@@ -862,8 +862,23 @@ def create_app(config: Config | None = None) -> FastAPI:
         return _mask_out(db.update_mask(con, mask_id, **fields), crop)
 
     @app.delete("/api/masks/{mask_id}")
-    def delete_mask(mask_id: str, con: Any = Depends(get_con)):
-        """Soft delete (SPEC section 4). The row stays; the exporter skips it."""
+    def delete_mask(mask_id: str, user: dict = Depends(current_user),
+                    con: Any = Depends(get_con)):
+        """Soft delete (SPEC section 4). The row stays; the exporter skips it.
+
+        Author-or-admin, by owner decision: deleting your own polygon and
+        redrawing it is part of drawing, so it cannot be admin-only - but
+        deleting someone ELSE's polygon destroys work you did not do, which
+        makes it curation, and curation is the admin's. The other delete
+        routes (users, frames, age samples) are already admin-gated; this is
+        the rule that makes deletion coherent across the app."""
+        mask = _need(db.get_mask(con, mask_id), "mask", mask_id)
+        if user["role"] != "admin" and mask.get("created_by") != user["username"]:
+            raise HTTPException(
+                403,
+                f"this polygon was drawn by {mask.get('created_by') or 'someone else'}; "
+                "only its author or an admin can delete it",
+            )
         db.soft_delete_mask(con, mask_id)
         return {"ok": True}
 

@@ -86,3 +86,24 @@ body {
    routes, on warm paper. So there is no [data-surface="label"] block here and no
    second palette to keep in sync: the app is light throughout, and the canvas
    paints its own sunken backdrop behind the crop. */
+
+/* Transparency ground for masked age samples. A cutout's alpha IS the
+   masking; a solid backdrop would read as context the bee does not have, so
+   the familiar checkerboard says "nothing here" instead. Neutral warm grays
+   to sit with the surface tokens; -sm is the thumbnail variant. */
+.checkerboard {
+  background-color: #ffffff;
+  background-image:
+    linear-gradient(45deg, #e7e4df 25%, transparent 25%, transparent 75%, #e7e4df 75%),
+    linear-gradient(45deg, #e7e4df 25%, transparent 25%, transparent 75%, #e7e4df 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+}
+.checkerboard-sm {
+  background-color: #ffffff;
+  background-image:
+    linear-gradient(45deg, #e7e4df 25%, transparent 25%, transparent 75%, #e7e4df 75%),
+    linear-gradient(45deg, #e7e4df 25%, transparent 25%, transparent 75%, #e7e4df 75%);
+  background-size: 8px 8px;
+  background-position: 0 0, 4px 4px;
+}

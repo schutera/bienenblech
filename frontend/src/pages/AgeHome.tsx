@@ -494,7 +494,7 @@ export default function AgeHome() {
                         src={ageSampleFileUrl(x.sample_id)}
                         alt={x.filename}
                         loading="lazy"
-                        className="w-12 h-12 object-cover rounded-lg border border-border bg-surface-sunk shrink-0"
+                        className="w-12 h-12 object-contain rounded-lg border border-border checkerboard-sm shrink-0"
                       />
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">

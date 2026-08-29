@@ -213,9 +213,12 @@ export default function AgeLabel() {
 
       {error ? <ErrorNote onDismiss={() => setError(null)}>{error}</ErrorNote> : null}
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_340px] items-start">
-        {/* The bee gets the room — the judgment is made from pixels alone. */}
-        <div className="rounded-2xl border border-border bg-surface-sunk grid place-items-center p-3 min-h-[50vh]">
+      <div className="flex flex-col gap-4 max-w-4xl w-full mx-auto">
+        {/* The bee gets the room — the judgment is made from pixels alone. The
+            checkerboard is the ground on purpose: a masked cutout's alpha IS
+            the masking, and any solid backdrop would read as context the bee
+            does not actually have. */}
+        <div className="checkerboard rounded-2xl border border-border grid place-items-center p-3 min-h-[40vh]">
           <img
             src={ageSampleFileUrl(sample.sample_id)}
             alt={sample.filename}
@@ -223,22 +226,9 @@ export default function AgeLabel() {
           />
         </div>
 
-        <aside className="flex flex-col gap-4">
-          <Card className="p-4">
-            <SectionLabel>How old is this bee?</SectionLabel>
-
-            <div
-              className={
-                "font-display text-4xl leading-none tabular-nums mt-3 transition-colors " +
-                (touched ? "text-near-black" : "text-gray-tertiary")
-              }
-            >
-              {readout(ageDays)}
-            </div>
-            <p className="text-[12px] text-gray-tertiary mt-1.5">
-              {touched ? band(ageDays) : "Move the slider to judge."}
-            </p>
-
+        {/* The slider sits directly under the image it judges — hand and eye
+            travel together. */}
+        <Card className="p-4">
             {/*
              * 0..28 whole days, 28 right-censored as "28+" (four weeks or
              * older). Why the scale stops there: summer workers average 15-38
@@ -280,9 +270,22 @@ export default function AgeLabel() {
               </div>
             </div>
 
-            <div className="mt-4">
-              {/* Disabled until touched: an untouched default would silently
-                  bias the labels toward one number (see the file comment). */}
+          <div className="flex items-end justify-between gap-4 flex-wrap mt-3">
+            <div>
+              <SectionLabel>How old is this bee?</SectionLabel>
+            <div
+              className={
+                "font-display text-4xl leading-none tabular-nums mt-3 transition-colors " +
+                (touched ? "text-near-black" : "text-gray-tertiary")
+              }
+            >
+              {readout(ageDays)}
+            </div>
+            <p className="text-[12px] text-gray-tertiary mt-1.5">
+              {touched ? band(ageDays) : "Move the slider to judge."}
+            </p>
+            </div>
+            <div className="flex flex-col items-end gap-1.5 min-w-[220px]">
               <Button size="lg" className="w-full" onClick={() => void saveAndNext()} disabled={!canNext}>
                 {busy ? "Saving" : "Next"}
               </Button>
@@ -292,7 +295,7 @@ export default function AgeLabel() {
                   : "Enabled once the slider has been moved — an untouched default is not a judgment."}
               </p>
             </div>
-
+          </div>
             <p className="text-[11px] text-gray-tertiary mt-3 flex items-center gap-1.5 flex-wrap">
               <Kbd>&larr;</Kbd>
               <Kbd>&rarr;</Kbd>
@@ -300,7 +303,7 @@ export default function AgeLabel() {
               <Kbd className="ml-2">&#9166;</Kbd>
               <span>next</span>
             </p>
-          </Card>
+        </Card>
 
           <Card className="p-4">
             <SectionLabel>Cannot be judged?</SectionLabel>
@@ -342,15 +345,10 @@ export default function AgeLabel() {
             )}
           </Card>
 
-          <Card className="p-4">
-            <SectionLabel>Sample</SectionLabel>
-            <p className="text-[13px] text-near-black mt-1.5 break-all">{sample.filename}</p>
-            <p className="text-[12px] text-gray-tertiary mt-1">
-              {sample.width}x{sample.height} px
-              {sample.uploaded_by ? `, uploaded by ${sample.uploaded_by}` : ""}.
-            </p>
-          </Card>
-        </aside>
+        <p className="text-[12px] text-gray-tertiary">
+          {sample.width}x{sample.height} px
+          {sample.uploaded_by ? `, uploaded by ${sample.uploaded_by}` : ""}.
+        </p>
       </div>
     </div>
   );

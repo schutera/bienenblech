@@ -49,8 +49,8 @@ from . import db, uploads
 from .api import _file_etag, _need, current_user, require_admin
 from .config import Config
 
-# JPEGs are already compressed (same reasoning as export.py's constants); only
-# labels.csv earns deflate.
+# Stored sample images are already compressed — JPEG and PNG alike (same
+# reasoning as export.py's constants); only labels.csv earns deflate.
 _IMG_COMPRESS = zipfile.ZIP_STORED
 _TXT_COMPRESS = zipfile.ZIP_DEFLATED
 
@@ -105,8 +105,11 @@ def build_age_zip(
 ) -> dict[str, Any]:
     """Write the age dataset zip at `out_path`; return `{n_samples, bytes}`.
 
-    `images/<sample_id>.jpg` + `labels.csv` with one row per ANNOTATED sample
-    (`sample_id, filename, age_days, annotated_by, annotated_at`). Flagged
+    `images/<sample_id>.<ext>` + `labels.csv` with one row per ANNOTATED
+    sample (`sample_id, filename, age_days, annotated_by, annotated_at`).
+    `<ext>` is the stored derivative's own suffix — .png for masked cutouts
+    with alpha, .jpg for opaque sources — because the stored file goes into
+    the zip verbatim and a lying extension would break every loader. Flagged
     samples are excluded by construction — the query filters on
     `status='done'` — because a flag means the age question had no answer, and
     a row in a regression dataset must have one. Open samples contribute
@@ -136,8 +139,9 @@ def build_age_zip(
                 ["sample_id", "filename", "age_days", "annotated_by", "annotated_at"]
             )
             for row in sorted(rows, key=lambda r: str(r["sample_id"])):
+                ext = Path(row["stored_path"]).suffix or ".jpg"
                 zf.write(
-                    row["stored_path"], f"images/{row['sample_id']}.jpg",
+                    row["stored_path"], f"images/{row['sample_id']}{ext}",
                     compress_type=_IMG_COMPRESS,
                 )
                 writer.writerow([
@@ -213,11 +217,14 @@ def create_router(config: Config) -> APIRouter:
                 duplicates.append(_sample_out(existing))
                 continue
             sample_id = uuid.uuid4().hex
-            dest = age_dir(config) / f"{sample_id}.jpg"
-            # Same re-encode as Blech frames (EXIF transpose, RGB, max_edge,
-            # store_quality) — imported, never copied, so the two tools cannot
-            # drift apart on what a stored derivative is.
-            width, height, nbytes = uploads._write_derivative(config, data, dest)
+            # Same decode/EXIF/max_edge pipeline as Blech frames — imported,
+            # never copied — but through the alpha-preserving writer: a masked
+            # cutout's transparency IS the masking, so a source with alpha
+            # stores as PNG (alpha intact) and only opaque sources store as
+            # JPEG. `dest`'s suffix records which one happened.
+            width, height, nbytes, dest = uploads.write_age_derivative(
+                config, data, age_dir(config) / sample_id
+            )
             try:
                 row = db.insert_age_sample(
                     con,
@@ -265,7 +272,10 @@ def create_router(config: Config) -> APIRouter:
         etag, headers = _file_etag(path)
         if etag in (request.headers.get("if-none-match") or ""):
             return Response(status_code=304, headers=headers)
-        return FileResponse(str(path), media_type="image/jpeg", headers=headers)
+        # The stored suffix names the actual format (uploads.write_age_derivative):
+        # .png for masked cutouts with alpha, .jpg for opaque sources.
+        media = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+        return FileResponse(str(path), media_type=media, headers=headers)
 
     @router.get("/samples/{sample_id}")
     def get_sample(sample_id: str, con: Any = Depends(get_con)):
@@ -314,8 +324,9 @@ def create_router(config: Config) -> APIRouter:
     def delete_sample(sample_id: str, con: Any = Depends(get_con)):
         """Hard delete, file included. Admin-only: destructive, like deleting a
         Blech image — but no ?force= gate, because a sample carries at most one
-        answer, not hours of polygons. Row first, then the file, so a
-        half-deleted sample stays deletable on a second attempt."""
+        answer, not hours of polygons. Row first, then the file (at whatever
+        suffix `stored_path` names), so a half-deleted sample stays deletable
+        on a second attempt."""
         row = db.delete_age_sample(con, sample_id)
         Path(row["stored_path"]).unlink(missing_ok=True)
         return {"ok": True}
@@ -327,7 +338,7 @@ def create_router(config: Config) -> APIRouter:
     @router.get("/export", dependencies=[Depends(require_admin)])
     def export_zip(con: Any = Depends(get_con)):
         """Stream the age dataset zip. Built into a temp file (it carries every
-        annotated sample's JPEG) and unlinked by a BackgroundTask once the
+        annotated sample's image) and unlinked by a BackgroundTask once the
         response is sent — same lifecycle as /api/export/yolo."""
         tmpdir = Path(tempfile.mkdtemp(prefix="bienenblech-age-export-"))
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")

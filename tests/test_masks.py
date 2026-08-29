@@ -12,6 +12,7 @@ SOURCE-IMAGE.
 """
 from __future__ import annotations
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 TRIANGLE = [[10.0, 10.0], [60.0, 10.0], [60.0, 60.0]]
@@ -310,3 +311,50 @@ def test_a_poweruser_may_label(
         f"/api/crops/{crop_id}/complete", json={"is_empty": False}
     ).status_code == 200
     assert poweruser.delete(f"/api/masks/{mask['mask_id']}").status_code == 200
+
+
+# ---------------------------------------------------------------- delete gate
+# Owner decision (2026-08-29): deletion across the app belongs to the admin -
+# users, frames, class archiving and age samples already did, and masks join
+# with the one carve-out that keeps labeling possible: the AUTHOR may still
+# delete their own polygon, because deleting-and-redrawing is part of drawing.
+# Deleting someone else's polygon destroys work you did not do; that is
+# curation, and curation is the admin's.
+
+def test_author_can_delete_their_own_mask(
+    poweruser: TestClient, mite_class: dict, crop_rows: list[dict]
+):
+    mask = _post_mask(poweruser, crop_rows[0]["crop_id"], mite_class["class_id"], TRIANGLE)
+    resp = poweruser.delete(f"/api/masks/{mask['mask_id']}")
+    assert resp.status_code == 200, resp.text
+    task = poweruser.get(f"/api/crops/{crop_rows[0]['crop_id']}").json()
+    assert all(m["mask_id"] != mask["mask_id"] for m in task["masks"])
+
+
+def test_a_poweruser_cannot_delete_someone_elses_mask(
+    app: FastAPI, admin: TestClient, poweruser: TestClient,
+    mite_class: dict, crop_rows: list[dict]
+):
+    """The polygon survives and the refusal names the rule, so the annotator
+    learns the boundary instead of suspecting a bug."""
+    mask = _post_mask(poweruser, crop_rows[1]["crop_id"], mite_class["class_id"], TRIANGLE)
+    admin.post("/api/users", json={
+        "username": "second_pu", "password": "pw-second-pu", "role": "poweruser",
+    }).raise_for_status()
+    with TestClient(app) as other:
+        other.post("/api/login", json={
+            "username": "second_pu", "password": "pw-second-pu",
+        }).raise_for_status()
+        resp = other.delete(f"/api/masks/{mask['mask_id']}")
+    assert resp.status_code == 403, resp.text
+    assert "author or an admin" in resp.json()["detail"]
+    task = poweruser.get(f"/api/crops/{crop_rows[1]['crop_id']}").json()
+    assert any(m["mask_id"] == mask["mask_id"] for m in task["masks"])
+
+
+def test_admin_can_delete_anyones_mask(
+    admin: TestClient, poweruser: TestClient, mite_class: dict, crop_rows: list[dict]
+):
+    mask = _post_mask(poweruser, crop_rows[2]["crop_id"], mite_class["class_id"], TRIANGLE)
+    resp = admin.delete(f"/api/masks/{mask['mask_id']}")
+    assert resp.status_code == 200, resp.text
