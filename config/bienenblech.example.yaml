@@ -13,6 +13,7 @@
 project: bienenblech
 paths:
   db_path: data/bienenblech.duckdb
+  age_db_path: data/age.duckdb   # modular per-tool stores; each backed up on its own schedule
   images_dir: data/images
   cache_dir: data/cache
   backups_dir: data/backups

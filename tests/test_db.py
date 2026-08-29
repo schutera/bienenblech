@@ -350,3 +350,24 @@ def test_the_role_flip_replays_as_a_no_op(con):
         "FROM users ORDER BY username"
     ).fetchall()
     assert second == first, "replaying the boot path disturbed migrated users"
+
+
+def test_same_path_for_both_stores_is_a_boot_error(tmp_path, monkeypatch):
+    """paths.age_db_path == paths.db_path defeats the split and would let the
+    legacy-table drop destroy live age data - loud and fatal at boot, because
+    it is a config error, not a runtime state."""
+    import pytest as _pytest
+    from bienenblech.api import create_app
+    from bienenblech.config import BackupCfg, Config, PathsCfg
+
+    root = tmp_path / 'store'
+    same = str(root / 'one.duckdb')
+    cfg = Config(
+        paths=PathsCfg(db_path=same, age_db_path=same,
+                       images_dir=str(root / 'images'),
+                       cache_dir=str(root / 'cache'),
+                       backups_dir=str(root / 'backups')),
+        backup=BackupCfg(enabled=False),
+    )
+    with _pytest.raises(ValueError, match="age_db_path must differ"):
+        create_app(cfg)

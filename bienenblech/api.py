@@ -31,8 +31,13 @@ Four things worth knowing before editing:
 
 The Age tool's routes (/api/age/*) live in `age.py` and are included as a
 router by `create_app`; they inherit the app-level login gate and the exception
-handlers above. Only `/api/picker/examples` stays here, because it is the one
-endpoint that reads both tools' tables.
+handlers above — but they run on their OWN store: modular per-tool storage
+(owner decision) puts `age_samples` in `paths.age_db_path` with its own
+backup_runs/meta, while users deliberately stay global in the main store so
+auth and sessions are untouched. The API surface itself is unchanged by the
+split. Only `/api/picker/examples` stays here, because it is the one endpoint
+that needs both tools — it now queries each store on its own connection
+(`get_con` + `get_age_con`) and merges.
 """
 from __future__ import annotations
 
@@ -248,41 +253,55 @@ def _post_login_webhook(webhook: str, content: str) -> None:
 _login_poster: LoginPoster = _post_login_webhook
 
 
-def _send_login_alert(webhook: str, username: str) -> None:
-    """Thread body: post the presence line, swallow every failure.
+def _send_alert(webhook: str, content: str) -> None:
+    """Thread body for any presence ping: post, swallow every failure.
 
-    The message is boring on purpose - username and event, full stop. No
-    password material, no session data, and no client IP: the handler does not
-    have the IP in hand anyway (it would mean reaching into request scope), and
-    quietly teaching a chat channel to accumulate IP addresses is a privacy
-    decision nobody has made. One redacted alert line is the only trace a
-    failure leaves."""
+    Rides `_login_poster` - the one injectable seam - so a test that patches
+    the poster sees every ping the app would send, whatever the event."""
     try:
-        _login_poster(webhook, f"bienenblech: '{username}' logged in")
-    except Exception as e:  # noqa: BLE001 - the webhook must never surface to a login
+        _login_poster(webhook, content)
+    except Exception as e:  # noqa: BLE001 - the webhook must never surface to a request
         print(f"{_LOGIN_ALERT} webhook failed: {_redact(str(e) or repr(e), webhook)}", flush=True)
 
 
-def _notify_login(username: str) -> None:
-    """Fire-and-forget Discord ping for a SUCCESSFUL login.
-
-    Successful only: failed attempts post nothing, because a bad-password storm
-    posting to Discord is an amplification annoyance and the channel is for
-    presence, not intrusion detection - the server log still carries the 401s.
-    Unset or blank env var is a fully supported state (a box with no channel),
-    not a warning: no post, no log spam, the login proceeds untouched. The post
-    rides a daemon thread so a slow or dead Discord can never hold a login
-    response hostage."""
+def _notify(content: str, *, thread_name: str) -> None:
+    """Fire-and-forget Discord ping. The shared discipline for every event:
+    env var read at the point of use, unset is a supported no-op, the post
+    rides a daemon thread, and nothing here may ever change a route's
+    response."""
     webhook = os.environ.get(WEBHOOK_ENV, "").strip()
     if not webhook:
         return
     try:
         threading.Thread(
-            target=_send_login_alert, args=(webhook, username),
-            name="bienenblech-login-alert", daemon=True,
+            target=_send_alert, args=(webhook, content),
+            name=thread_name, daemon=True,
         ).start()
     except Exception as e:  # noqa: BLE001 - "can't start new thread" under load
         print(f"{_LOGIN_ALERT} webhook failed: {_redact(str(e) or repr(e), webhook)}", flush=True)
+
+
+def _notify_login(username: str) -> None:
+    """Ping for a SUCCESSFUL login.
+
+    Successful only: failed attempts post nothing, because a bad-password storm
+    posting to Discord is an amplification annoyance and the channel is for
+    presence, not intrusion detection - the server log still carries the 401s."""
+    _notify(f"bienenblech: '{username}' logged in",
+            thread_name="bienenblech-login-alert")
+
+
+def notify_queue_empty(tool: str, summary: str) -> None:
+    """Ping when a tool's labeling queue just ran dry (owner request).
+
+    Fires only on the TRANSITION to zero open items, which needs no debounce:
+    the action that empties a queue cannot repeat while it stays empty, and a
+    queue refilled (reopen, new upload) that later empties again has genuinely
+    finished twice. Deletions that empty a queue do not ping - that is an
+    admin's own act, not labeling news. `tool` names the database ('blech' or
+    'age') because each tool is its own store."""
+    _notify(f"bienenblech: {tool} queue is empty - {summary}",
+            thread_name="bienenblech-queue-alert")
 
 
 # ------------------------------------------------------------- response shaping
@@ -429,6 +448,16 @@ def create_app(config: Config | None = None) -> FastAPI:
     # into a schema the routes can rely on. `init_db` already brings the users
     # table up; `ensure_user_table` is repeated because it costs nothing and
     # nothing here should depend on that ordering staying true.
+    #
+    # BOTH stores are opened and initialised here — modular per-tool storage
+    # (owner decision): the main store (users + Blech + its own backup_runs/
+    # meta) and the age store (age_samples + its own pair), each
+    # self-describing and detachable. Users stay global in the main store on
+    # purpose: one login, one role, everywhere. The one-time
+    # `migrate_legacy_age_samples` runs while both connections are in hand —
+    # it copies a pre-split main store's age_samples rows over (resume-safe)
+    # and drops the legacy table, printing one line; a never-pre-split store
+    # boots silently through it.
     boot = db.connect(config)
     try:
         db.init_db(boot)
@@ -436,6 +465,20 @@ def create_app(config: Config | None = None) -> FastAPI:
         warning = auth.bootstrap_admin(boot)
         if warning:
             print(f"[bienenblech.auth] {warning}", flush=True)
+        if Path(config.paths.db_path).resolve() == Path(config.paths.age_db_path).resolve():
+            # Both tools pointed at one file defeats the split and would let
+            # the legacy-table drop below destroy the live age data. Loud and
+            # fatal on purpose: this is a config error, not a runtime state.
+            raise ValueError(
+                "paths.age_db_path must differ from paths.db_path - the age "
+                "tool lives in its own store"
+            )
+        boot_age = db.connect_age(config)
+        try:
+            db.init_age_db(boot_age)
+            db.migrate_legacy_age_samples(boot, boot_age)
+        finally:
+            boot_age.close()
     finally:
         boot.close()
 
@@ -476,7 +519,7 @@ def create_app(config: Config | None = None) -> FastAPI:
     app.add_exception_handler(ValueError, lambda r, e: _error(400, e, "bad request"))
 
     def get_con():
-        """A connection per request, closed when the response is done.
+        """A MAIN-STORE connection per request, closed when the response is done.
 
         Read-write for everyone: DuckDB refuses a second connection to the same
         file opened with a different mode in one process, and the backup thread
@@ -484,6 +527,19 @@ def create_app(config: Config | None = None) -> FastAPI:
         the writer, not itself.
         """
         con = db.connect(config)
+        try:
+            yield con
+        finally:
+            con.close()
+
+    def get_age_con():
+        """An AGE-STORE connection per request — get_con's exact twin (same
+        lifecycle, same read-write reasoning, the age backup thread holds a
+        writer on ITS file too), opening `paths.age_db_path` instead. Only the
+        picker endpoint below uses it in this module; the /api/age routes carry
+        their own copy inside age.py's router, since these closures do not
+        export."""
+        con = db.connect_age(config)
         try:
             yield con
         finally:
@@ -727,6 +783,14 @@ def create_app(config: Config | None = None) -> FastAPI:
             )
         crop = db.set_crop_status(con, crop_id, status="done",
                                   is_empty=bool(body.is_empty), actor=user["username"])
+        # Completing needs an open crop, so reaching zero open crops HERE is
+        # exactly the transition to an empty queue - no state to track.
+        st = db.stats(con)
+        if st["n_crops"] > 0 and st["n_done"] == st["n_crops"]:
+            notify_queue_empty(
+                "blech",
+                f"all {st['n_crops']} crops done, {st['n_masks']} polygons",
+            )
         return _crop_task(con, crop)
 
     @app.post("/api/crops/{crop_id}/reopen")
@@ -964,21 +1028,26 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     # ---------------------------------------------------------------- age tool
     # The whole /api/age surface lives in age.py (imported at the top of this
-    # factory); it shares this app's require_login gate, exception handlers and
-    # store. Included before the SPA catch-all below for the same declaration-
-    # order reason as every /api route.
+    # factory); it shares this app's require_login gate and exception handlers
+    # but rides its OWN store via age.py's get_age_con (modular per-tool
+    # storage). Included before the SPA catch-all below for the same
+    # declaration-order reason as every /api route.
     app.include_router(age.create_router(config))
 
     # ------------------------------------------------------------------ picker
     @app.get("/api/picker/examples")
-    def picker_examples(con: Any = Depends(get_con)):
+    def picker_examples(con: Any = Depends(get_con),
+                        age_con: Any = Depends(get_age_con)):
         """One representative id per tool, so the tool picker's tiles can show
         real data: `{"blech": crop_id | null, "age": sample_id | null}`. Lives
         here, not in either tool's module, because it is the one endpoint that
-        reads both tools' tables — the picker sits above both tools exactly the
-        way this file sits above their routers. Null when a tool is empty; the
-        picker renders its quiet fallback tile for that."""
-        return db.picker_examples(con)
+        reads both tools' data — the picker sits above both tools exactly the
+        way this file sits above their routers. Since the stores split it asks
+        each store on its OWN connection and merges the two answers here — no
+        cross-database ATTACH, ever. Null when a tool is empty; the picker
+        renders its quiet fallback tile for that."""
+        return {"blech": db.picker_example_blech(con),
+                "age": db.picker_example_age(age_con)}
 
     # -------------------------------------------------------- static SPA (last)
     # Mounted last so every /api route above wins the match. Resolved from the

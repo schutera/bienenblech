@@ -64,7 +64,8 @@ The parts worth knowing:
 | `upload.max_edge` | downscale-if-larger for the stored derivative. Masks are stored against that derivative, so **do not change it once anything is labeled**. |
 | `upload.store_quality` | 92 — the stored JPEG *is* the archival copy. |
 | `auth.https_only` | `true` behind a real domain (HTTPS-only session cookie); `bienenblech.prod.yaml` already ships `true`. On plain HTTP it must be `false` or the login loops. |
-| `backup.*` | interval, how many zips to keep, the Discord upload ceiling. |
+| `backup.*` | interval, how many zips to keep (per store), the Discord upload ceiling. |
+| `paths.age_db_path` | the Age tool's own store, default `data/age.duckdb`. Existing configs need no edit. |
 
 Secrets are never in YAML. `BIENENBLECH_SECRET`, `BIENENBLECH_ADMIN_USER`,
 `BIENENBLECH_ADMIN_PASSWORD` and the optional `BIENENBLECH_DISCORD_WEBHOOK` are
@@ -154,16 +155,27 @@ Keep `imgsz` equal to `crop.size`, so the model trains on exactly the pixels tha
 were labeled. `data.yaml`'s `path` is relative to the unzipped directory, so run
 the command from next to it (or edit it to an absolute path).
 
-## Backups
+## Storage and backups
 
-A daemon thread inside the app zips the whole store on an interval
+Persistent state is **two DuckDB stores**. `data/bienenblech.duckdb` holds the
+users plus everything above — images, crops, classes, masks, audit.
+`data/age.duckdb` (`paths.age_db_path`) holds the samples of the Age tool, the
+second labeler behind the same login. Accounts are global and live only in the
+main store; roles mean the same in both tools. Each store carries its own
+backup bookkeeping, so either file can be moved or restored on its own.
+
+A daemon thread inside the app backs up each store on its own weekly watermark
 (`backup.interval_days`, default 7) into `data/backups/`, keeps the last
-`backup.keep` (default 8) and — if `BIENENBLECH_DISCORD_WEBHOOK` is set — posts
-it to a Discord channel. The zip holds the DuckDB file, flat `masks.csv` /
-`classes.csv` / `crops.csv` exports that outlive DuckDB itself, and **the source
-images**: labels without pixels are worthless.
+`backup.keep` (default 8) per store and — if `BIENENBLECH_DISCORD_WEBHOOK` is
+set — posts to a Discord channel. Blech-only activity never fires an Age
+backup, or vice versa. The Blech zip (`bienenblech-<stamp>-<run>.zip`) holds
+the DuckDB snapshot (minus `users`), flat `images.csv` / `crops.csv` /
+`classes.csv` / `masks.csv` exports that outlive DuckDB itself, and **the
+source images**: labels without pixels are worthless. The Age zip
+(`bienenblech-age-<stamp>-<run>.zip`) holds the age store's snapshot,
+`age_samples.csv`, and the stored bee photos from `data/age/`.
 
-If the zip exceeds `backup.max_upload_mb` (Discord's per-file limit) it is still
+If a zip exceeds `backup.max_upload_mb` (Discord's per-file limit) it is still
 written and rotated locally, and only a text summary naming the local path is
 posted — a silently dropped backup is the failure mode this design exists to
 avoid. An unset webhook is a supported state, not an error.

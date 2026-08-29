@@ -4,8 +4,10 @@
 `data/bienenblech.duckdb` holds labeling hours, which SPEC section 4 calls the
 only thing on this box that cannot be regenerated — a test run that corrupted it
 would be worse than having no tests at all. So the `store` fixture builds a
-`Config` whose four paths all live under pytest's `tmp_path`, asserts that they
-do, and also points `$BIENENBLECH_CONFIG` at a matching YAML file so that any
+`Config` whose paths ALL live under pytest's `tmp_path` — both DuckDB stores
+(`db_path` and, since the per-tool split, `age_db_path`) and every directory —
+asserts that they do, and also points `$BIENENBLECH_CONFIG` at a matching YAML
+file so that any
 code path which reaches for `load_config()` on its own still lands in the
 sandbox rather than in the repo. The dev server on :8001 is a different process
 with a different store and is never contacted.
@@ -81,6 +83,10 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
     root = tmp_path / "store"
     paths = PathsCfg(
         db_path=str(root / "bienenblech.duckdb"),
+        # The AGE store — its own DuckDB file since the per-tool split. Named
+        # explicitly (not left to the repointing loop below) because a test
+        # that boots the app now writes TWO stores, and both must land here.
+        age_db_path=str(root / "age.duckdb"),
         images_dir=str(root / "images"),
         cache_dir=str(root / "cache"),
         backups_dir=str(root / "backups"),
@@ -94,7 +100,8 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
     # Repoint every unrecognised string field under `root` before anything can
     # read it, keeping only the default's basename.
     for name in type(config.paths).model_fields:
-        if name in ("db_path", "images_dir", "cache_dir", "backups_dir"):
+        if name in ("db_path", "age_db_path", "images_dir", "cache_dir",
+                    "backups_dir"):
             continue
         default = getattr(config.paths, name)
         if isinstance(default, str):
@@ -236,6 +243,26 @@ def query(store: Config) -> Callable[..., list[tuple]]:
 
     def run(sql: str, params: Any = ()) -> list[tuple]:
         con = db.connect(store)
+        try:
+            return con.execute(sql, list(params)).fetchall()
+        finally:
+            con.close()
+
+    return run
+
+
+@pytest.fixture
+def age_query(store: Config) -> Callable[..., list[tuple]]:
+    """`query`'s twin for the AGE store (`paths.age_db_path`).
+
+    Since the per-tool split, `age_samples` lives in its own DuckDB file — a
+    `query()` against the main store cannot see it at all, which is itself one
+    of the invariants under test (test_split_stores.py). Same
+    connection-per-call discipline as `query`, for the same lock reason.
+    """
+
+    def run(sql: str, params: Any = ()) -> list[tuple]:
+        con = db.connect_age(store)
         try:
             return con.execute(sql, list(params)).fetchall()
         finally:

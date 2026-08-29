@@ -42,6 +42,11 @@ class PathsCfg(BaseModel):
     that escapes it is state that survives no redeploy and lands in no backup."""
 
     db_path: str = "data/bienenblech.duckdb"
+    # Modular per-tool stores: the Age tool's rows live in their own DuckDB file
+    # beside the main one, each self-describing (own meta + backup_runs) and
+    # each backed up on its own schedule. Users stay GLOBAL in db_path — one
+    # login, one role, everywhere. Defaulted so existing configs work unedited.
+    age_db_path: str = "data/age.duckdb"
     images_dir: str = "data/images"      # the stored derivatives; masks refer to these
     cache_dir: str = "data/cache"        # rendered crop JPEGs; safe to delete, regenerated
     backups_dir: str = "data/backups"    # rotated backup zips

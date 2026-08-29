@@ -1,10 +1,23 @@
-"""Backup tests — SPEC section 8 and amendments A11, A12, A13, A15.
+"""Backup tests — SPEC section 8 and amendments A11, A12, A13, A15, updated
+for the per-tool store split.
 
 This archive is *posted to a chat channel*. That single fact is what most of
-these tests defend: what goes into the zip, what must never go into the zip, and
-what must happen when it cannot be posted. The rest defend the failure taxonomy,
-whose whole purpose is that a transient lock can never turn into a permanently
-disabled backup.
+these tests defend: what goes into each zip, what must never go into any zip,
+and what must happen when one cannot be posted. The rest defend the failure
+taxonomy, whose whole purpose is that a transient lock can never turn into a
+permanently disabled backup.
+
+Since the split there are TWO independent weekly jobs, one per store, and the
+independence is itself contract: own watermark (in each store's own `meta`),
+own 6h failure cooldown, own claim row, own rotation (`backup.keep` applies
+per store), posting to the same webhook. `bienenblech-<stamp>-<run>.zip` is
+the Blech archive — its member list back to exactly its pre-age shape — and
+`bienenblech-age-<stamp>-<run>.zip` is the Age archive with the `age.duckdb`
+snapshot. Blech-only activity must never fire an age backup and vice versa;
+section 8's failure taxonomy applies per store. The blech-side tests therefore
+drive `backup._run_store(backup._BLECH, ...)` — the per-store job the
+scheduler runs — and the handful of tests about the combined `run_backup`
+say so explicitly.
 
 Self-contained on purpose: every fixture is defined at module level, under
 names (`seeded_store`, `admin_client`) that cannot collide with the differently
@@ -19,15 +32,16 @@ TWO SAFETY RULES, both enforced by autouse fixtures:
    needs a configured webhook sets an obviously fake one and passes an explicit
    recording `poster`. That applies to the tests that "cannot possibly post" too:
    the point of the guard is the day one of them can.
-2. **No test may touch the real store.** Every path is under `tmp_path` and
-   `_paths_are_sandboxed` asserts it. A run that rotated away real backups would
-   be worse than no tests at all.
+2. **No test may touch the real store.** Every path — both DuckDB files
+   included — is under `tmp_path` and `_paths_are_sandboxed` asserts it. A run
+   that rotated away real backups would be worse than no tests at all.
 """
 from __future__ import annotations
 
 import io
 import json
 import os
+import re
 import shutil
 import urllib.request
 import zipfile
@@ -63,6 +77,14 @@ FAKE_WEBHOOK = (
 # it is the strongest available statement of A11: not "the table was dropped"
 # but "the hash was never written into this file".
 SCRYPT_MARKER = b"scrypt$"
+
+# The two archive name shapes, restated here from the contract rather than read
+# out of backup.py — the file names are an interface (operators fetch them by
+# hand, rotation keys on them), so a drift must fail a test, not follow it.
+# 'bienenblech' is a PREFIX of 'bienenblech-age', which is exactly why rotation
+# and these helpers match the full shape and never a bare prefix glob.
+BLECH_ZIP_RE = re.compile(r"^bienenblech-\d{8}T\d{6}Z-[0-9a-f]{8}\.zip$")
+AGE_ZIP_RE = re.compile(r"^bienenblech-age-\d{8}T\d{6}Z-[0-9a-f]{8}\.zip$")
 
 
 # --------------------------------------------------------------------- fixtures
@@ -110,6 +132,7 @@ def _config(root: Path, **backup_kw: Any) -> Config:
         project="bienenblech-test",
         paths={
             "db_path": str(root / "bienenblech.duckdb"),
+            "age_db_path": str(root / "age.duckdb"),
             "images_dir": str(root / "images"),
             "cache_dir": str(root / "cache"),
             "backups_dir": str(root / "backups"),
@@ -126,12 +149,13 @@ def cfg(root: Path) -> Config:
 
 @pytest.fixture(autouse=True)
 def _paths_are_sandboxed(request: pytest.FixtureRequest, tmp_path: Path) -> None:
-    """Refuse to run a test whose store or backups directory escapes `tmp_path`."""
+    """Refuse to run a test whose stores or backups directory escape `tmp_path`."""
     if "cfg" not in request.fixturenames:
         return
     config: Config = request.getfixturevalue("cfg")
-    for path in (config.paths.db_path, config.paths.images_dir,
-                 config.paths.cache_dir, config.paths.backups_dir):
+    for path in (config.paths.db_path, config.paths.age_db_path,
+                 config.paths.images_dir, config.paths.cache_dir,
+                 config.paths.backups_dir):
         assert Path(path).resolve().is_relative_to(tmp_path.resolve()), (
             f"test store escaped tmp_path: {path}"
         )
@@ -139,7 +163,7 @@ def _paths_are_sandboxed(request: pytest.FixtureRequest, tmp_path: Path) -> None
 
 @pytest.fixture()
 def admin_client(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
-    """A signed-in admin client against a fresh store.
+    """A signed-in admin client against a fresh pair of stores.
 
     The scheduler thread is stubbed out rather than merely disabled: it is a
     process-global daemon that would outlive the test holding a DuckDB handle in
@@ -154,7 +178,7 @@ def admin_client(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestC
 class Recorder:
     """A `Poster` that records instead of posting, and optionally fails.
 
-    `run_backup(poster=...)` exists precisely so the delivery ladder is testable
+    `_run_store(poster=...)` exists precisely so the delivery ladder is testable
     with no network — see `backup.Poster`."""
 
     def __init__(self, error: Exception | None = None) -> None:
@@ -174,6 +198,16 @@ def poster() -> Recorder:
 
 
 # ---------------------------------------------------------------------- helpers
+
+def _run_blech(config: Config, **kw: Any) -> dict[str, Any]:
+    """One attempt of the BLECH job — the per-store run the scheduler makes."""
+    return backup._run_store(backup._BLECH, config, **kw)
+
+
+def _run_age(config: Config, **kw: Any) -> dict[str, Any]:
+    """One attempt of the AGE job."""
+    return backup._run_store(backup._AGE, config, **kw)
+
 
 def _png(seed: int, size: int = FRAME) -> bytes:
     im = Image.new("RGB", (size, size))
@@ -197,10 +231,24 @@ def _upload(client: TestClient, seed: int) -> str:
     return payload["images"][0]["image_id"]
 
 
+def _upload_age(client: TestClient, seed: int) -> str:
+    """One age sample through the real route, returning its sample_id."""
+    r = client.post(
+        "/api/age/samples",
+        files=[("file", (f"bee{seed}.png", io.BytesIO(_png(seed)), "image/png"))],
+    )
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload["samples"], f"age upload {seed} was deduped: {payload}"
+    return payload["samples"][0]["sample_id"]
+
+
 @pytest.fixture()
 def seeded_store(admin_client: TestClient) -> dict[str, Any]:
-    """A seeded store built through the real API: one frame, a 2x2 crop grid, two
-    classes, polygons on two crops, one completed crop and one `is_empty` crop.
+    """A seeded BLECH store built through the real API: one frame, a 2x2 crop
+    grid, two classes, polygons on two crops, one completed crop and one
+    `is_empty` crop. The AGE store is deliberately left empty — several tests
+    below lean on exactly that asymmetry.
 
     Built through HTTP rather than by inserting rows so the crop grid, the
     coordinate offsets and the completion guards are exactly what production
@@ -240,13 +288,15 @@ def _members(zip_path: str | Path) -> list[str]:
         return sorted(zf.namelist())
 
 
-def _extract_snapshot(zip_path: str | Path, dest_dir: Path) -> Path:
-    """Pull `bienenblech.duckdb` out of the archive onto its own, and only its
+def _extract_snapshot(
+    zip_path: str | Path, dest_dir: Path, member: str = "bienenblech.duckdb"
+) -> Path:
+    """Pull the DB snapshot out of the archive onto its own, and only its
     own, path — a restore has nothing but this member and no WAL sidecar."""
     dest_dir.mkdir(parents=True, exist_ok=True)
-    out = dest_dir / "bienenblech.duckdb"
+    out = dest_dir / member
     with zipfile.ZipFile(zip_path) as zf:
-        out.write_bytes(zf.read("bienenblech.duckdb"))
+        out.write_bytes(zf.read(member))
     return out
 
 
@@ -263,23 +313,35 @@ def _count(con: duckdb.DuckDBPyConnection, table: str) -> int:
     return int(con.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0])
 
 
-def _runs(cfg: Config) -> list[dict[str, Any]]:
-    """Every `backup_runs` row, oldest first.
+def _store_runs(con: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
+    backup.ensure_backup_tables(con)
+    cols = ("run_id", "status", "trigger", "delivered", "delivery", "error",
+            "zip_path", "started_at", "finished_at")
+    rows = con.execute(
+        'SELECT run_id, status, "trigger", delivered, delivery, error, zip_path, '
+        "started_at, finished_at FROM backup_runs ORDER BY started_at"
+    ).fetchall()
+    return [dict(zip(cols, row)) for row in rows]
 
-    `ensure_backup_tables` is called first because `db.init_db` declares
-    `backup_runs` without the additive `delivery` column (A13) — a store whose
-    backup module never opened it therefore has no such column, which is exactly
-    the situation in the contention tests, where `_open_store` is stubbed out."""
+
+def _runs(cfg: Config) -> list[dict[str, Any]]:
+    """Every `backup_runs` row of the MAIN store, oldest first.
+
+    `ensure_backup_tables` is called first so this works against a store whose
+    backup machinery never ran — exactly the situation in the contention tests,
+    where `_open_store` is stubbed out."""
     con = db.connect(cfg)
     try:
-        backup.ensure_backup_tables(con)
-        cols = ("run_id", "status", "trigger", "delivered", "delivery", "error",
-                "zip_path", "started_at", "finished_at")
-        rows = con.execute(
-            'SELECT run_id, status, "trigger", delivered, delivery, error, zip_path, '
-            "started_at, finished_at FROM backup_runs ORDER BY started_at"
-        ).fetchall()
-        return [dict(zip(cols, row)) for row in rows]
+        return _store_runs(con)
+    finally:
+        con.close()
+
+
+def _age_runs(cfg: Config) -> list[dict[str, Any]]:
+    """Every `backup_runs` row of the AGE store — its own history, its own file."""
+    con = db.connect_age(cfg)
+    try:
+        return _store_runs(con)
     finally:
         con.close()
 
@@ -292,8 +354,27 @@ def _watermark(cfg: Config) -> str | None:
         con.close()
 
 
-def _zips(cfg: Config) -> list[Path]:
-    return sorted(Path(cfg.paths.backups_dir).glob("bienenblech-*.zip"))
+def _age_watermark(cfg: Config) -> str | None:
+    con = db.connect_age(cfg)
+    try:
+        backup.ensure_backup_tables(con)
+        return db.get_meta(con, backup.META_WATERMARK)
+    finally:
+        con.close()
+
+
+def _blech_zips(cfg: Config) -> list[Path]:
+    return sorted(
+        p for p in Path(cfg.paths.backups_dir).glob("*.zip")
+        if BLECH_ZIP_RE.match(p.name)
+    )
+
+
+def _age_zips(cfg: Config) -> list[Path]:
+    return sorted(
+        p for p in Path(cfg.paths.backups_dir).glob("*.zip")
+        if AGE_ZIP_RE.match(p.name)
+    )
 
 
 # ============================================================== A11: the headline
@@ -316,7 +397,7 @@ def test_users_table_is_not_in_the_backup_snapshot(seeded_store, cfg, poster, tm
     contain no scrypt hash anywhere — a table copied and then dropped can still
     leave its blocks readable in the file, so "never copied" is the property
     under test, not "deleted afterwards"."""
-    result = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
+    result = _run_blech(cfg, trigger="cli", force=True, poster=poster)
     assert result["status"] == "ok", result
     assert not poster.calls, "no webhook is configured, so nothing may be posted"
 
@@ -368,18 +449,17 @@ def test_no_zip_member_carries_a_password_hash(seeded_store, cfg, poster, tmp_pa
     fine and expected — `created_by`, `completed_by`, `uploaded_by` are
     provenance, and a dataset that cannot say who labeled what is a worse
     dataset. Hashes are the secret, so the assertion is about hashes."""
-    result = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
+    result = _run_blech(cfg, trigger="cli", force=True, poster=poster)
     assert result["status"] == "ok", result
 
     with zipfile.ZipFile(result["zip_path"]) as zf:
         names = zf.namelist()
         assert "users.csv" not in names
         csvs = [n for n in names if n.endswith(".csv")]
-        # age_samples.csv joined when the Age tool landed (SPEC section 8
-        # extended): annotator judgment now lives in two tables, so the flat
-        # rescue must carry both.
-        assert sorted(csvs) == ["age_samples.csv", "classes.csv", "crops.csv",
-                                "images.csv", "masks.csv"]
+        # Back to the PRE-AGE four since the store split: age_samples.csv now
+        # travels in the age archive, whose store this zip never opens.
+        assert sorted(csvs) == ["classes.csv", "crops.csv", "images.csv",
+                                "masks.csv"]
         for name in csvs:
             text = zf.read(name).decode("utf-8")
             header = text.splitlines()[0].split(",")
@@ -397,6 +477,32 @@ def test_no_zip_member_carries_a_password_hash(seeded_store, cfg, poster, tmp_pa
 
 
 # ============================================== enumerated members, not a walk
+
+def test_blech_zip_member_list_is_exactly_its_pre_age_shape(
+    seeded_store, cfg, admin_client, poster
+):
+    """The Blech archive's member list, pinned exactly — and pinned to its
+    PRE-AGE shape (owner decision, the store split): DB snapshot, the four flat
+    CSVs, the frame derivatives, manifest, README. Nothing age-shaped, even
+    while the age store right next to it holds samples: those now travel in
+    `bienenblech-age-*.zip`, and a blech zip that quietly re-grew age members
+    would mean the blech job opened the wrong store."""
+    sample_id = _upload_age(admin_client, 90)   # age data EXISTS, elsewhere
+    result = _run_blech(cfg, trigger="cli", force=True, poster=poster)
+    assert result["status"] == "ok", result
+    assert BLECH_ZIP_RE.match(Path(result["zip_path"]).name), result["zip_path"]
+
+    names = _members(result["zip_path"])
+    assert names == sorted([
+        "bienenblech.duckdb",
+        "classes.csv", "crops.csv", "images.csv", "masks.csv",
+        f"images/{seeded_store['image_id']}.jpg",
+        "manifest.json", "README.txt",
+    ]), f"the blech member list drifted from its pre-age shape: {names}"
+    assert not any(n.startswith("age/") for n in names)
+    assert "age_samples.csv" not in names
+    assert sample_id not in str(names)
+
 
 def test_a_stray_file_beside_the_images_never_reaches_the_archive(
     seeded_store, cfg, poster, tmp_path
@@ -417,7 +523,7 @@ def test_a_stray_file_beside_the_images_never_reaches_the_archive(
     Path(cfg.paths.backups_dir).mkdir(parents=True, exist_ok=True)
     (Path(cfg.paths.backups_dir) / "leftover.txt").write_text("x", encoding="utf-8")
 
-    result = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
+    result = _run_blech(cfg, trigger="cli", force=True, poster=poster)
     assert result["status"] == "ok", result
 
     names = _members(result["zip_path"])
@@ -490,7 +596,7 @@ def test_a_failure_naming_the_webhook_is_redacted_in_backup_runs_error(
     token = FAKE_WEBHOOK.rsplit("/", 1)[-1]
     exploding = Recorder(error=RuntimeError(f"HTTP 401 Unauthorized for {FAKE_WEBHOOK}"))
 
-    result = backup.run_backup(cfg, trigger="cli", force=True, poster=exploding)
+    result = _run_blech(cfg, trigger="cli", force=True, poster=exploding)
 
     assert result["status"] == "failed"
     assert exploding.calls, "the poster should have been reached"
@@ -520,7 +626,7 @@ def test_oversize_zip_is_still_written_rotated_and_summarised(
     where to fetch it."""
     cfg = _config(root, max_upload_mb=0)   # every archive is over a 0 MB cap
     monkeypatch.setenv(backup.WEBHOOK_ENV, FAKE_WEBHOOK)
-    result = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
+    result = _run_blech(cfg, trigger="cli", force=True, poster=poster)
 
     assert result["status"] == "ok", result
     assert result["delivery"] == "posted_summary"
@@ -528,7 +634,7 @@ def test_oversize_zip_is_still_written_rotated_and_summarised(
     zip_path = Path(result["zip_path"])
     assert zip_path.is_file(), "the oversize archive was not written"
     assert zip_path.stat().st_size == result["zip_bytes"] > 0
-    assert zip_path in _zips(cfg), "the oversize archive was not retained locally"
+    assert zip_path in _blech_zips(cfg), "the oversize archive was not retained locally"
     assert "bienenblech.duckdb" in _members(zip_path)
 
     assert len(poster.calls) == 1
@@ -562,13 +668,13 @@ def test_unset_webhook_still_zips_rotates_and_advances_the_watermark(
     assert backup.WEBHOOK_ENV not in os.environ
 
     assert _watermark(cfg) is None
-    result = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
+    result = _run_blech(cfg, trigger="cli", force=True, poster=poster)
 
     assert result["status"] == "ok", result
     assert result["delivery"] == "skipped"
     assert not poster.calls, "nothing may be posted with no webhook configured"
     assert Path(result["zip_path"]).is_file()
-    assert _zips(cfg) == [Path(result["zip_path"])]
+    assert _blech_zips(cfg) == [Path(result["zip_path"])]
 
     watermark = _watermark(cfg)
     assert watermark, "the watermark must advance even with no webhook"
@@ -576,7 +682,7 @@ def test_unset_webhook_still_zips_rotates_and_advances_the_watermark(
     con = db.connect(cfg)
     try:
         assert datetime.fromisoformat(watermark) == backup._last_change(con)
-        is_due, reason = backup.due(con, cfg.backup)
+        is_due, reason = backup.due(con, cfg.backup, store=backup._BLECH)
     finally:
         con.close()
     assert is_due is False and "nothing new" in reason
@@ -584,8 +690,8 @@ def test_unset_webhook_still_zips_rotates_and_advances_the_watermark(
 
 def test_discord_disabled_still_produces_a_local_archive(seeded_store, cfg, poster):
     """`discord=False` is the same supported shape reached a different way."""
-    result = backup.run_backup(cfg, trigger="cli", force=True, discord=False,
-                               poster=poster)
+    result = _run_blech(cfg, trigger="cli", force=True, discord=False,
+                        poster=poster)
     assert result["status"] == "ok" and result["delivery"] == "disabled"
     assert not poster.calls
     assert Path(result["zip_path"]).is_file()
@@ -594,8 +700,8 @@ def test_discord_disabled_still_produces_a_local_archive(seeded_store, cfg, post
 # ============================================================== rotation
 
 def test_local_rotation_keeps_exactly_backup_keep_archives(seeded_store, root, poster):
-    """Rotation keeps `backup.keep` zips under `backups_dir` — no more (the disk
-    is small and the images are the expensive half) and no fewer.
+    """Rotation keeps `backup.keep` zips OF THIS STORE under `backups_dir` — no
+    more (the disk is small and the images are the expensive half) and no fewer.
 
     Pruned BY NAME, not by mtime: the names lead with a UTC stamp and therefore
     sort chronologically, while an archive restored onto the box carries an
@@ -611,14 +717,56 @@ def test_local_rotation_keeps_exactly_backup_keep_archives(seeded_store, root, p
     for path in older:
         path.write_bytes(b"an older archive")
 
-    result = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
+    result = _run_blech(cfg, trigger="cli", force=True, poster=poster)
     assert result["status"] == "ok", result
 
-    remaining = _zips(cfg)
+    remaining = _blech_zips(cfg)
     assert len(remaining) == keep, [p.name for p in remaining]
     assert Path(result["zip_path"]) in remaining, "rotation removed the new archive"
     # The survivors are the newest by name: the last (keep - 1) placeholders.
     assert remaining[:-1] == older[-(keep - 1):]
+
+
+def test_rotation_is_per_prefix_and_blind_to_the_other_stores_zips(
+    seeded_store, admin_client, root, poster
+):
+    """`backup.keep` applies PER STORE, and each store's rotation must be blind
+    to the other's archives. The trap is textual: 'bienenblech' is a prefix of
+    'bienenblech-age', so the pre-split glob `bienenblech-*.zip` matches BOTH
+    names — a blech rotation still using it would count the age archives
+    against the blech budget and, given enough of them, delete the newest age
+    zips as 'oldest blech'. Rotation must key on the full name shape."""
+    cfg = _config(root, keep=3)
+    sample_id = _upload_age(admin_client, 91)
+    r = admin_client.post(f"/api/age/samples/{sample_id}/annotate",
+                          json={"age_days": 9})
+    assert r.status_code == 200, r.text
+
+    backups = Path(cfg.paths.backups_dir)
+    backups.mkdir(parents=True, exist_ok=True)
+    old_blech = [backups / f"bienenblech-2020010{i}T000000Z-aaaaaaa{i}.zip"
+                 for i in range(1, 6)]
+    old_age = [backups / f"bienenblech-age-2020010{i}T000000Z-bbbbbbb{i}.zip"
+               for i in range(1, 6)]
+    for path in (*old_blech, *old_age):
+        path.write_bytes(b"an older archive")
+
+    result = _run_blech(cfg, trigger="cli", force=True, poster=poster)
+    assert result["status"] == "ok", result
+    assert len(_blech_zips(cfg)) == 3, [p.name for p in _blech_zips(cfg)]
+    assert _age_zips(cfg) == old_age, (
+        "the blech rotation touched the age archives — 'bienenblech' is a "
+        "prefix of 'bienenblech-age', and the rotation matched on the prefix"
+    )
+
+    result = _run_age(cfg, trigger="cli", force=True, keep=2, poster=poster)
+    assert result["status"] == "ok", result
+    age_remaining = _age_zips(cfg)
+    assert len(age_remaining) == 2, [p.name for p in age_remaining]
+    assert Path(result["zip_path"]) in age_remaining
+    assert len(_blech_zips(cfg)) == 3, (
+        "the age rotation deleted blech archives"
+    )
 
 
 # ============================================================== failure taxonomy
@@ -636,23 +784,25 @@ def test_contention_on_open_writes_no_row_arms_no_cooldown_and_does_not_fail(
     present months later as "the backups just stopped"."""
     monkeypatch.setattr(
         backup, "_open_store",
-        lambda config: (_ for _ in ()).throw(backup._StoreBusy("locked by the app")),
+        lambda store, config: (_ for _ in ()).throw(
+            backup._StoreBusy("locked by the app")
+        ),
     )
 
-    result = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
+    result = _run_blech(cfg, trigger="cli", force=True, poster=poster)
 
     assert result["status"] == "skipped"
     assert result["reason"] == "store busy"
     assert result["error"] is None, "contention is not an error"
     assert result["status"] != "failed", "the CLI exits non-zero only on 'failed'"
     assert not poster.calls
-    assert _zips(cfg) == [], "a skipped run must not write an archive"
+    assert _blech_zips(cfg) == [], "a skipped run must not write an archive"
 
     monkeypatch.undo()
     assert _runs(cfg) == [], "contention must write no backup_runs row at all"
     con = db.connect(cfg)
     try:
-        is_due, _ = backup.due(con, cfg.backup)
+        is_due, _ = backup.due(con, cfg.backup, store=backup._BLECH)
     finally:
         con.close()
     assert is_due is True, "contention must not arm the cooldown"
@@ -664,20 +814,21 @@ def test_a_refused_claim_writes_no_row_and_arms_no_cooldown(
     """The other half of the contention class: the claim mutex refused us because
     another runner (the scheduler thread, a second container on one bind mount)
     holds it. Same rule — no row, no cooldown, exit 0."""
-    monkeypatch.setattr(backup, "_claim", lambda con, *, trigger: None)
+    monkeypatch.setattr(backup, "_claim",
+                        lambda con, *, trigger, store=None: None)
 
-    result = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
+    result = _run_blech(cfg, trigger="cli", force=True, poster=poster)
 
     assert result["status"] == "skipped"
     assert result["reason"] == "store busy"
     assert result["run_id"] is None
-    assert _zips(cfg) == []
+    assert _blech_zips(cfg) == []
 
     monkeypatch.undo()
     assert _runs(cfg) == []
     con = db.connect(cfg)
     try:
-        assert backup.due(con, cfg.backup)[0] is True
+        assert backup.due(con, cfg.backup, store=backup._BLECH)[0] is True
     finally:
         con.close()
 
@@ -695,7 +846,7 @@ def test_genuine_failure_writes_a_failed_row_arms_the_cooldown_and_holds_the_wat
     monkeypatch.setenv(backup.WEBHOOK_ENV, FAKE_WEBHOOK)
     exploding = Recorder(error=RuntimeError("connection refused"))
 
-    result = backup.run_backup(cfg, trigger="cli", force=True, poster=exploding)
+    result = _run_blech(cfg, trigger="cli", force=True, poster=exploding)
 
     assert result["status"] == "failed"
     assert result["error"]
@@ -712,7 +863,7 @@ def test_genuine_failure_writes_a_failed_row_arms_the_cooldown_and_holds_the_wat
     )
     con = db.connect(cfg)
     try:
-        is_due, reason = backup.due(con, cfg.backup)
+        is_due, reason = backup.due(con, cfg.backup, store=backup._BLECH)
     finally:
         con.close()
     assert is_due is False and "cooling down" in reason
@@ -726,25 +877,25 @@ def test_claim_is_a_mutex_using_the_transient_running_status(seeded_store, cfg, 
     and a manual run, which is what stops two processes zipping the same store at
     once. `'running'` is never a final state; a lease closes out an abandoned
     claim so a runner killed mid-run cannot wedge the job forever."""
-    con = backup._open_store(cfg)
+    con = backup._open_store(backup._BLECH, cfg)
     try:
-        claim = backup._claim(con, trigger="cli")
+        claim = backup._claim(con, trigger="cli", store=backup._BLECH)
         assert claim is not None and claim["run_id"]
         status = con.execute(
             "SELECT status FROM backup_runs WHERE run_id = ?", [claim["run_id"]]
         ).fetchone()[0]
         assert status == "running"
 
-        assert backup._claim(con, trigger="manual") is None, (
+        assert backup._claim(con, trigger="manual", store=backup._BLECH) is None, (
             "a second claim inside the lease must be refused"
         )
     finally:
         con.close()
 
     # And a full run against the held claim is contention, not failure.
-    result = backup.run_backup(cfg, trigger="manual", force=True, poster=poster)
+    result = _run_blech(cfg, trigger="manual", force=True, poster=poster)
     assert result["status"] == "skipped" and result["reason"] == "store busy"
-    assert _zips(cfg) == []
+    assert _blech_zips(cfg) == []
 
 
 def test_skipped_is_unreachable_in_the_backup_runs_table(
@@ -756,17 +907,18 @@ def test_skipped_is_unreachable_in_the_backup_runs_table(
     `backup_runs` means somebody wrote one — which means a cooldown could be
     armed off a transient lock. This drives one run of each kind and then asserts
     the table's vocabulary."""
-    ok = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
+    ok = _run_blech(cfg, trigger="cli", force=True, poster=poster)
     assert ok["status"] == "ok"
 
     monkeypatch.setenv(backup.WEBHOOK_ENV, FAKE_WEBHOOK)
-    failed = backup.run_backup(cfg, trigger="cli", force=True,
-                               poster=Recorder(error=RuntimeError("nope")))
+    failed = _run_blech(cfg, trigger="cli", force=True,
+                        poster=Recorder(error=RuntimeError("nope")))
     assert failed["status"] == "failed"
     monkeypatch.delenv(backup.WEBHOOK_ENV, raising=False)
 
-    monkeypatch.setattr(backup, "_claim", lambda con, *, trigger: None)
-    skipped = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
+    monkeypatch.setattr(backup, "_claim",
+                        lambda con, *, trigger, store=None: None)
+    skipped = _run_blech(cfg, trigger="cli", force=True, poster=poster)
     assert skipped["status"] == "skipped"
     monkeypatch.undo()
 
@@ -789,25 +941,25 @@ def test_delivery_is_text_carrying_a_reason_not_a_boolean(seeded_store, root, mo
 
     # 1. no webhook at all
     poster = Recorder()
-    seen["unset"] = backup.run_backup(cfg, force=True, poster=poster)["delivery"]
+    seen["unset"] = _run_blech(cfg, force=True, poster=poster)["delivery"]
 
     # 2. Discord explicitly disabled for this run
-    seen["disabled"] = backup.run_backup(cfg, force=True, discord=False,
-                                         poster=poster)["delivery"]
+    seen["disabled"] = _run_blech(cfg, force=True, discord=False,
+                                  poster=poster)["delivery"]
 
     # 3. a configured URL that is not a Discord webhook -> refused, never fetched
     monkeypatch.setenv(backup.WEBHOOK_ENV, "https://example.invalid/hooks/whatever")
-    seen["refused"] = backup.run_backup(cfg, force=True, poster=poster)["delivery"]
+    seen["refused"] = _run_blech(cfg, force=True, poster=poster)["delivery"]
     assert not poster.calls, "a non-Discord URL must not even be contacted"
 
     # 4. posted for real (with an injected poster)
     monkeypatch.setenv(backup.WEBHOOK_ENV, FAKE_WEBHOOK)
-    seen["posted"] = backup.run_backup(cfg, force=True, poster=poster)["delivery"]
+    seen["posted"] = _run_blech(cfg, force=True, poster=poster)["delivery"]
     assert len(poster.calls) == 1 and poster.calls[0]["file_path"] is not None
 
     # 5. over the cap -> summary only
-    seen["oversize"] = backup.run_backup(_config(root, max_upload_mb=0), force=True,
-                                         poster=poster)["delivery"]
+    seen["oversize"] = _run_blech(_config(root, max_upload_mb=0), force=True,
+                                  poster=poster)["delivery"]
 
     assert len(set(seen.values())) == 5, f"reasons collapsed together: {seen}"
     assert all(isinstance(v, str) for v in seen.values())
@@ -839,9 +991,10 @@ def test_delivery_is_text_carrying_a_reason_not_a_boolean(seeded_store, root, mo
 
 # ============================================================== A15: watermark
 
-def test_last_change_is_the_max_of_masks_crops_and_images(seeded_store, cfg):
-    """A15: the watermark is `max(mask created/updated, crop completed_at,
-    image uploaded_at)` — three sources, not one."""
+def test_blech_last_change_is_the_max_of_masks_crops_and_images(seeded_store, cfg):
+    """A15, post-split: the BLECH watermark is `max(mask created/updated, crop
+    completed_at, image uploaded_at)` — three sources, and no longer a fourth:
+    the age rows live in their own store with their own watermark now."""
     con = db.connect(cfg)
     try:
         masks = con.execute(
@@ -865,7 +1018,7 @@ def test_a_new_image_with_no_new_masks_still_moves_the_watermark(
     gained fifty frames and no polygons is precisely the store that most needs
     backing up. This uploads a frame with no masks and no completions and proves
     the watermark moves anyway."""
-    first = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
+    first = _run_blech(cfg, trigger="cli", force=True, poster=poster)
     assert first["status"] == "ok"
     before = _watermark(cfg)
     assert before
@@ -875,7 +1028,7 @@ def test_a_new_image_with_no_new_masks_still_moves_the_watermark(
         masks_before = con.execute(
             "SELECT max(greatest(created_at, coalesce(updated_at, created_at))) FROM masks"
         ).fetchone()[0]
-        assert backup.due(con, cfg.backup) == (
+        assert backup.due(con, cfg.backup, store=backup._BLECH) == (
             False, f"nothing new since the last backup (watermark {before})"
         )
     finally:
@@ -897,7 +1050,7 @@ def test_a_new_image_with_no_new_masks_still_moves_the_watermark(
     finally:
         con.close()
 
-    second = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
+    second = _run_blech(cfg, trigger="cli", force=True, poster=poster)
     assert second["status"] == "ok"
     after = _watermark(cfg)
     assert datetime.fromisoformat(after) > datetime.fromisoformat(before)
@@ -970,7 +1123,9 @@ def test_snapshot_db_is_readable_and_transactionally_whole(seeded_store, cfg, tm
 def test_backup_status_never_reports_the_webhook_url(seeded_store, cfg, monkeypatch):
     """`status()` reports WHETHER a webhook is configured, never the URL — it
     feeds `GET /api/backup/status`, which SPEC section 5 does not gate to admins,
-    and it is also what the CLI prints on a shared terminal."""
+    and it is also what the CLI prints on a shared terminal. Since the split it
+    reports both stores, so the whole payload is searched, per-store entries
+    included."""
     monkeypatch.setenv(backup.WEBHOOK_ENV, FAKE_WEBHOOK)
     out = backup.status(cfg)
 
@@ -980,34 +1135,27 @@ def test_backup_status_never_reports_the_webhook_url(seeded_store, cfg, monkeypa
     assert FAKE_WEBHOOK.rsplit("/", 1)[-1] not in json.dumps(out, default=str)
 
 
-# ================================================ the age tool joins the backup
-# The Age tool's samples are annotator judgment too, so SPEC section 8's rules
-# extend to them unchanged: files enumerated from the DB (never a directory
-# walk), age-only activity counts as new work for the A15 watermark, and a
-# store that predates the tool still backs up. These tests reuse this module's
-# sandboxed fixtures; the HTTP-level age contract itself is pinned in
-# tests/test_age.py.
+# ======================================================== the age store's job
+# Since the split the Age tool has its OWN weekly job against its own store:
+# own watermark in its own meta, own cooldown, own claim, own rotation, same
+# webhook, `bienenblech-age-<stamp>-<run>.zip`. SPEC section 8's rules extend
+# to it unchanged — files enumerated from the DB, never a directory walk; the
+# failure taxonomy applies per store — and the A11 exclusion machinery runs on
+# the age snapshot too, belt and braces, even though the age store carries no
+# users table to exclude. The HTTP-level age contract is pinned in
+# tests/test_age.py; the store split itself in tests/test_split_stores.py.
 
-def _upload_age(client: TestClient, seed: int) -> str:
-    """One age sample through the real route, returning its sample_id."""
-    r = client.post(
-        "/api/age/samples",
-        files=[("file", (f"bee{seed}.png", io.BytesIO(_png(seed)), "image/png"))],
-    )
-    assert r.status_code == 200, r.text
-    payload = r.json()
-    assert payload["samples"], f"age upload {seed} was deduped: {payload}"
-    return payload["samples"][0]["sample_id"]
-
-
-def test_age_sample_files_and_csv_join_the_archive(
-    seeded_store, cfg, admin_client, poster
+def test_age_zip_carries_exactly_the_age_members_and_its_snapshot_opens(
+    cfg, admin_client, poster, tmp_path
 ):
-    """The zip carries `age/<sample_id>.jpg` plus `age_samples.csv`, and the
-    CSV keeps the whole judgment — including FLAGGED rows, unlike the training
-    export at /api/age/export: a flag and its reason are annotator work, and
-    the backup is the store of record, not a dataset. A backup that dropped
-    them would be the one place a flag disappears."""
+    """The age archive, pinned exactly: the `age.duckdb` snapshot, one flat
+    `age_samples.csv` (FLAGGED rows included — a flag and its reason are
+    annotator judgment, and this archive is the store of record, not a training
+    set), the sample photos enumerated from the table, manifest, README. The
+    snapshot must actually OPEN and hold the rows — an empty or torn member
+    would pass any name-list check while losing the entire backup — and the
+    A11 machinery must have run on it: no users table and no scrypt bytes,
+    belt and braces for a store that never carries either."""
     done_id = _upload_age(admin_client, 71)
     flagged_id = _upload_age(admin_client, 72)
     r = admin_client.post(f"/api/age/samples/{done_id}/annotate",
@@ -1017,26 +1165,68 @@ def test_age_sample_files_and_csv_join_the_archive(
                           json={"reason": "two bees"})
     assert r.status_code == 200, r.text
 
-    result = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
+    result = _run_age(cfg, trigger="cli", force=True, poster=poster)
     assert result["status"] == "ok", result
+    assert result["store"] == "age"
+    zip_path = Path(result["zip_path"])
+    assert AGE_ZIP_RE.match(zip_path.name), (
+        f"the age archive must be named bienenblech-age-<stamp>-<run>.zip, "
+        f"got {zip_path.name}"
+    )
 
-    with zipfile.ZipFile(result["zip_path"]) as zf:
-        names = zf.namelist()
-        assert f"age/{done_id}.jpg" in names
-        assert f"age/{flagged_id}.jpg" in names
+    names = _members(zip_path)
+    assert names == sorted([
+        "age.duckdb",
+        "age_samples.csv",
+        f"age/{done_id}.jpg",
+        f"age/{flagged_id}.jpg",
+        "manifest.json", "README.txt",
+    ]), f"the age member list drifted from the contract: {names}"
+
+    with zipfile.ZipFile(zip_path) as zf:
         rows = zf.read("age_samples.csv").decode("utf-8").splitlines()
+        man = json.loads(zf.read("manifest.json").decode("utf-8"))
+        for name in zf.namelist():
+            assert SCRYPT_MARKER not in zf.read(name), (
+                f"age zip member {name} contains a scrypt password hash"
+            )
 
     header = rows[0].split(",")
-    for col in ("sample_id", "status", "age_days", "annotated_by", "flag_reason"):
+    for col in ("sample_id", "status", "age_days", "annotated_by",
+                "flag_reason", "updated_at"):
         assert col in header, f"age_samples.csv lost the {col} column"
     by_id = {r.split(",")[header.index("sample_id")]: r for r in rows[1:]}
     assert set(by_id) == {done_id, flagged_id}
     assert "9" in by_id[done_id].split(",")
-    assert "two bees" in by_id[flagged_id]
+    assert "two bees" in by_id[flagged_id], (
+        "the flagged row (or its reason) is missing — the backup would be the "
+        "one place a flag disappears"
+    )
+
+    # The exclusion machinery ran, and said so.
+    assert "users" in man.get("snapshot_excluded_tables", [])
+
+    # The snapshot member is a database, not bytes that happen to be named one.
+    snapshot = _extract_snapshot(zip_path, tmp_path / "restore-age",
+                                 member="age.duckdb")
+    con = duckdb.connect(str(snapshot))
+    try:
+        tables = _tables(con)
+        assert "age_samples" in tables
+        assert "users" not in tables
+        assert _count(con, "age_samples") == 2
+        statuses = {
+            row[0] for row in
+            con.execute("SELECT status FROM age_samples").fetchall()
+        }
+        assert statuses == {"done", "flagged"}
+    finally:
+        con.close()
+    assert SCRYPT_MARKER not in snapshot.read_bytes()
 
 
 def test_a_stray_file_beside_the_age_samples_never_reaches_the_archive(
-    seeded_store, cfg, admin_client, poster
+    cfg, admin_client, poster
 ):
     """Enumerated, never walked — the same rule as `data/images`, for the same
     reason: this archive is posted to a chat channel, and a glob that one day
@@ -1045,7 +1235,7 @@ def test_a_stray_file_beside_the_age_samples_never_reaches_the_archive(
     age_dir = Path(cfg.paths.images_dir).parent / "age"
     (age_dir / "SECRET.env").write_text("BIENENBLECH_SECRET=oops", encoding="utf-8")
 
-    result = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
+    result = _run_age(cfg, trigger="cli", force=True, poster=poster)
     assert result["status"] == "ok", result
 
     names = _members(result["zip_path"])
@@ -1055,81 +1245,292 @@ def test_a_stray_file_beside_the_age_samples_never_reaches_the_archive(
     assert f"age/{sample_id}.jpg" in names
 
 
-def test_age_only_activity_moves_the_watermark(
-    seeded_store, cfg, admin_client, poster
+# ------------------------------------------------------------- independence
+
+def test_blech_only_activity_never_fires_the_age_job(seeded_store, cfg, poster):
+    """One scheduler pass over a box that did nothing but Blech work: the blech
+    job fires, the age job does not — not as 'skipped after due said no' in
+    some shared gate, but because the age store's OWN tables answered. No age
+    zip, no age run row, no age watermark: the age store must look untouched,
+    or a week of blech uploads would burn the age schedule's interval on empty
+    archives."""
+    result = backup.run_backup(cfg, trigger="schedule", poster=poster)
+    by_store = {r["store"]: r for r in result["stores"]}
+
+    assert by_store["blech"]["status"] == "ok", by_store
+    assert by_store["age"]["status"] == "skipped", by_store
+    assert "empty store" in (by_store["age"]["reason"] or "")
+
+    assert len(_blech_zips(cfg)) == 1
+    assert _age_zips(cfg) == [], "blech-only activity produced an age archive"
+    assert _age_runs(cfg) == [], "blech-only activity wrote an age run row"
+    assert _age_watermark(cfg) is None
+    assert _watermark(cfg) is not None
+
+    # The combined result mirrors the interesting store for legacy readers.
+    assert result["status"] == "ok"
+
+
+def test_age_only_activity_fires_the_age_job_only(cfg, admin_client, poster):
+    """The mirror image, and deliberately through a FLAG-ONLY store — the old
+    watermark gap, worth its own docstring: before the split a flag wrote no
+    timestamp anywhere (`annotated_at` stays NULL by design — a flag is a
+    refusal, not an answer), so a store whose only activity was flags read as
+    idle and never fired a backup, silently leaving that judgment unarchived.
+    `updated_at` (stamped by annotate, flag AND reopen) closes the gap, and
+    the age watermark is max(uploaded_at, updated_at). Here the flag-only age
+    store fires; the empty blech store stays silent, rowless and unwatermarked."""
+    sid = _upload_age(admin_client, 81)
+    r = admin_client.post(f"/api/age/samples/{sid}/flag", json={"reason": "blur"})
+    assert r.status_code == 200, r.text
+
+    result = backup.run_backup(cfg, trigger="schedule", poster=poster)
+    by_store = {r["store"]: r for r in result["stores"]}
+
+    assert by_store["age"]["status"] == "ok", by_store
+    assert by_store["blech"]["status"] == "skipped", by_store
+    assert "empty store" in (by_store["blech"]["reason"] or "")
+
+    assert len(_age_zips(cfg)) == 1
+    assert _blech_zips(cfg) == [], "age-only activity produced a blech archive"
+    assert _runs(cfg) == [], "age-only activity wrote a blech run row"
+    assert _watermark(cfg) is None
+    assert _age_watermark(cfg) is not None
+
+    # And the zip actually carries the flagged judgment it exists to save.
+    with zipfile.ZipFile(_age_zips(cfg)[0]) as zf:
+        assert "blur" in zf.read("age_samples.csv").decode("utf-8")
+
+
+def test_a_flag_after_a_backup_makes_the_age_job_due_again(
+    root, admin_client, poster
 ):
-    """A15 extended: a deployment that spends a week doing nothing but age work
-    (an admin uploading bees, powerusers judging them) has produced exactly the
-    irreplaceable thing backups exist for, so both an age upload and an
-    age-only annotation must read as new work — a watermark that watched only
-    the Blech tables would answer 'nothing new' forever."""
-    first = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
-    assert first["status"] == "ok"
-    before = _watermark(cfg)
+    """The flag-only WEEK, end to end: back up the age store, then do nothing
+    but flag — and the next scheduled evaluation must find the age job due and
+    fire it. This is the regression pin for the watermark fix: with the old
+    `max(uploaded_at, annotated_at)`-shaped gate the flag moved neither leg,
+    `due()` answered 'nothing new' forever, and the flag was never archived.
+    `interval_days=0` so the interval gate stays out of the picture — the
+    watermark comparison is the thing under test."""
+    cfg = _config(root, interval_days=0)
+    judged = _upload_age(admin_client, 82)
+    unjudged = _upload_age(admin_client, 83)
+    r = admin_client.post(f"/api/age/samples/{judged}/annotate",
+                          json={"age_days": 3})
+    assert r.status_code == 200, r.text
+
+    first = _run_age(cfg, trigger="schedule", poster=poster)
+    assert first["status"] == "ok", first
+    before = _age_watermark(cfg)
     assert before
 
-    con = db.connect(cfg)
+    con = db.connect_age(cfg)
     try:
-        assert backup.due(con, cfg.backup) == (
-            False, f"nothing new since the last backup (watermark {before})"
-        )
+        is_due, reason = backup.due(con, cfg.backup, store=backup._AGE)
+        assert is_due is False and "nothing new" in reason
     finally:
         con.close()
 
-    # Stage 1: an age UPLOAD only — no Blech activity, no annotation.
-    sample_id = _upload_age(admin_client, 74)
-    con = db.connect(cfg)
-    try:
-        assert backup._last_change(con) > datetime.fromisoformat(before), (
-            "an age upload did not register as new work (A15)"
-        )
-    finally:
-        con.close()
-    second = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
-    assert second["status"] == "ok"
-    between = _watermark(cfg)
-    assert datetime.fromisoformat(between) > datetime.fromisoformat(before)
-
-    # Stage 2: an age ANNOTATION only — no upload anywhere. The judgment is the
-    # part that cannot be regenerated at all.
-    r = admin_client.post(f"/api/age/samples/{sample_id}/annotate",
-                          json={"age_days": 28})
+    # The week's only activity: one flag. No upload, no annotation.
+    r = admin_client.post(f"/api/age/samples/{unjudged}/flag",
+                          json={"reason": "two bees"})
     assert r.status_code == 200, r.text
+
+    con = db.connect_age(cfg)
+    try:
+        assert backup._age_last_change(con) > datetime.fromisoformat(before), (
+            "a flag did not register as new age work — the flag-only-week "
+            "backup gap is back"
+        )
+        is_due, reason = backup.due(con, cfg.backup, store=backup._AGE)
+    finally:
+        con.close()
+    assert is_due is True, f"a flag-only week must make the age job due: {reason}"
+
+    second = _run_age(cfg, trigger="schedule", poster=poster)
+    assert second["status"] == "ok", second
+    assert len(_age_zips(cfg)) == 2
+    assert datetime.fromisoformat(_age_watermark(cfg)) > datetime.fromisoformat(before)
+
+
+# ------------------------------------------------------ per-store isolation
+
+def test_an_age_failure_cools_down_only_the_age_job(
+    seeded_store, cfg, admin_client, poster, monkeypatch
+):
+    """The 6-hour failure cooldown is PER STORE: a broken age run must not
+    suppress the blech schedule. Before the split one shared `backup_runs`
+    table meant one shared cooldown; now each store reads only its own history,
+    and a failure in one is invisible to the other's gate."""
+    sid = _upload_age(admin_client, 84)
+    r = admin_client.post(f"/api/age/samples/{sid}/annotate", json={"age_days": 7})
+    assert r.status_code == 200, r.text
+
+    monkeypatch.setenv(backup.WEBHOOK_ENV, FAKE_WEBHOOK)
+    failed = _run_age(cfg, trigger="cli", force=True,
+                      poster=Recorder(error=RuntimeError("connection refused")))
+    assert failed["status"] == "failed", failed
+    monkeypatch.delenv(backup.WEBHOOK_ENV, raising=False)
+
+    age_con = db.connect_age(cfg)
+    try:
+        is_due, reason = backup.due(age_con, cfg.backup, store=backup._AGE)
+    finally:
+        age_con.close()
+    assert is_due is False and "cooling down" in reason
+
     con = db.connect(cfg)
     try:
-        assert backup._last_change(con) > datetime.fromisoformat(between), (
-            "an age-only annotation did not register as new work (A15)"
+        is_due, reason = backup.due(con, cfg.backup, store=backup._BLECH)
+    finally:
+        con.close()
+    assert is_due is True, (
+        f"an age failure cooled down the blech job too: {reason}"
+    )
+
+    # The failed delivery leaves its zip behind (written before the poster
+    # exploded — that is the taxonomy working, not a leak); what matters here
+    # is that the blech run adds a blech archive and no age one.
+    age_zips_after_failure = _age_zips(cfg)
+    ok = _run_blech(cfg, trigger="schedule", poster=poster)
+    assert ok["status"] == "ok", (
+        "the blech job did not fire while the age job was cooling down"
+    )
+    assert _age_zips(cfg) == age_zips_after_failure
+    assert len(_blech_zips(cfg)) == 1
+
+
+def test_a_blech_failure_cools_down_only_the_blech_job(
+    seeded_store, cfg, admin_client, poster, monkeypatch
+):
+    """The same isolation, the other way round — the direction that bites in
+    production, because blech is the store with years of history and the
+    likelier one to be mid-write when the job fires."""
+    sid = _upload_age(admin_client, 85)
+    r = admin_client.post(f"/api/age/samples/{sid}/annotate", json={"age_days": 21})
+    assert r.status_code == 200, r.text
+
+    monkeypatch.setenv(backup.WEBHOOK_ENV, FAKE_WEBHOOK)
+    failed = _run_blech(cfg, trigger="cli", force=True,
+                        poster=Recorder(error=RuntimeError("connection refused")))
+    assert failed["status"] == "failed", failed
+    monkeypatch.delenv(backup.WEBHOOK_ENV, raising=False)
+
+    con = db.connect(cfg)
+    try:
+        is_due, reason = backup.due(con, cfg.backup, store=backup._BLECH)
+    finally:
+        con.close()
+    assert is_due is False and "cooling down" in reason
+
+    age_con = db.connect_age(cfg)
+    try:
+        is_due, reason = backup.due(age_con, cfg.backup, store=backup._AGE)
+    finally:
+        age_con.close()
+    assert is_due is True, (
+        f"a blech failure cooled down the age job too: {reason}"
+    )
+
+    # As above: the failed run's zip stays on disk by design. The pin is that
+    # the age run adds an age archive and no blech one.
+    blech_zips_after_failure = _blech_zips(cfg)
+    ok = _run_age(cfg, trigger="schedule", poster=poster)
+    assert ok["status"] == "ok", (
+        "the age job did not fire while the blech job was cooling down"
+    )
+    assert _blech_zips(cfg) == blech_zips_after_failure
+    assert len(_age_zips(cfg)) == 1
+
+
+def test_a_held_age_claim_does_not_block_the_blech_job(
+    seeded_store, cfg, admin_client, poster
+):
+    """Claims live in the store being claimed, so the two jobs never contend
+    with each other — a long age zip must not turn a due blech run into a
+    'store busy' skip. The held claim still refuses ITS OWN store's run, which
+    is the mutex doing its normal job."""
+    sid = _upload_age(admin_client, 86)
+    r = admin_client.post(f"/api/age/samples/{sid}/annotate", json={"age_days": 2})
+    assert r.status_code == 200, r.text
+
+    age_con = backup._open_store(backup._AGE, cfg)
+    try:
+        claim = backup._claim(age_con, trigger="cli", store=backup._AGE)
+        assert claim is not None and claim["run_id"]
+
+        blocked = _run_age(cfg, trigger="manual", force=True, poster=poster)
+        assert blocked["status"] == "skipped"
+        assert blocked["reason"] == "store busy"
+
+        ok = _run_blech(cfg, trigger="manual", force=True, poster=poster)
+        assert ok["status"] == "ok", (
+            "a held AGE claim blocked the BLECH job — the claims are supposed "
+            "to live in their own stores"
+        )
+    finally:
+        age_con.close()
+
+
+# --------------------------------------------------------------- odd stores
+
+def test_an_age_store_without_the_table_is_empty_not_broken(cfg, poster):
+    """A hand-restored or foreign `age.duckdb` with no `age_samples` table is
+    an EMPTY store, never a failed run: the scheduled evaluation answers 'not
+    due' instead of raising — a raise would write a failed row, arm the age
+    cooldown, and quietly stop archiving a store that was never broken."""
+    Path(cfg.paths.age_db_path).parent.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect(cfg.paths.age_db_path)
+    try:
+        con.execute("CREATE TABLE unrelated (x INTEGER)")
+    finally:
+        con.close()
+
+    result = _run_age(cfg, trigger="schedule", poster=poster)
+    assert result["status"] == "skipped", result
+    assert "empty store" in (result["reason"] or "")
+    assert _age_zips(cfg) == []
+
+
+def test_legacy_age_rows_in_an_unmigrated_main_store_never_fire_the_blech_job(cfg):
+    """The transition case: a main store from before the split that has not
+    yet been through its one-time boot migration (the CLI on a box whose
+    server never booted this build) still carries a legacy `age_samples`
+    table. Those rows must NOT count as blech work — age activity firing the
+    blech job is exactly the cross-talk the split removed — and they are not
+    lost either: until the migration moves them they still travel inside the
+    blech DB snapshot."""
+    con = db.connect(cfg)
+    try:
+        db.init_db(con)
+        con.execute("""
+            CREATE TABLE age_samples (
+                sample_id   TEXT PRIMARY KEY,
+                filename    TEXT NOT NULL,
+                sha256      TEXT NOT NULL UNIQUE,
+                stored_path TEXT NOT NULL,
+                width INTEGER NOT NULL, height INTEGER NOT NULL,
+                "bytes" BIGINT NOT NULL,
+                uploaded_by TEXT, uploaded_at TIMESTAMP NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                age_days INTEGER, annotated_by TEXT, annotated_at TIMESTAMP,
+                flag_reason TEXT
+            );
+        """)
+        con.execute(
+            "INSERT INTO age_samples (sample_id, filename, sha256, stored_path, "
+            'width, height, "bytes", uploaded_at) '
+            "VALUES ('legacy1', 'bee.png', ?, 'data/age/legacy1.jpg', 320, 240, "
+            "999, now())",
+            ["f" * 64],
+        )
+        assert backup._last_change(con) is None, (
+            "legacy age rows in the main store counted as blech work; a week "
+            "of pre-migration age uploads would fire blech backups"
         )
     finally:
         con.close()
 
-
-def test_backup_survives_a_store_without_the_age_table(
-    seeded_store, cfg, poster
-):
-    """A pre-age store still backs up — never a failed run that quietly stops
-    archiving the Blech work too.
-
-    The route this actually takes: `run_backup` opens the store through
-    `db.init_db` (idempotent by contract), so a pre-age store is migrated on
-    the spot and the age members degrade to an EMPTY `age_samples.csv` and no
-    `age/` files, rather than the run dying on a table that never existed.
-    Simulated by dropping the table from an otherwise-live store — exactly the
-    shape the run's own init_db then finds on disk."""
-    con = db.connect(cfg)
-    try:
-        con.execute("DROP TABLE IF EXISTS age_samples")
-    finally:
-        con.close()
-
-    result = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
-    assert result["status"] == "ok", result
-
-    names = _members(result["zip_path"])
-    assert not any(n.startswith("age/") for n in names)
-    with zipfile.ZipFile(result["zip_path"]) as zf:
-        rows = zf.read("age_samples.csv").decode("utf-8").splitlines()
-    assert len(rows) == 1, f"a store with no age work exported rows: {rows[1:]}"
-    # The Blech members are all still present.
-    assert f"images/{seeded_store['image_id']}.jpg" in names
-    assert "masks.csv" in names
+    result = _run_blech(cfg, trigger="schedule")
+    assert result["status"] == "skipped", result
+    assert "empty store" in (result["reason"] or "")

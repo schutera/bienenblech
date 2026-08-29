@@ -437,3 +437,48 @@ def test_n_done_matches_the_image_summary(
     summary = admin.get(f"/api/images/{image['image_id']}").json()["image"]
     assert task["n_done"] == summary["n_done"] == 1
     assert task["total"] == summary["n_crops"] == N_CROPS
+
+
+# ------------------------------------------------------------ queue-empty ping
+# Owner request (2026-08-29): one Discord ping when the Blech queue runs dry,
+# naming the database. Transition-only: completing needs an open crop, so
+# reaching zero open crops inside complete_crop IS the transition - there is
+# no debounce state to get wrong, and completing every crop but the last
+# posts nothing.
+
+def test_completing_the_last_crop_pings_queue_empty(
+    admin: TestClient, poweruser: TestClient, mite_class: dict,
+    crop_rows: list[dict], monkeypatch: pytest.MonkeyPatch,
+):
+    from bienenblech import api as api_mod
+    posts: list[str] = []
+    monkeypatch.setenv(api_mod.WEBHOOK_ENV, "https://discord.invalid/api/webhooks/1/testtoken")
+
+    class _InlineThreads:
+        class Thread:
+            def __init__(self, *, target, args=(), name=None, daemon=None):
+                self._t, self._a = target, args
+            def start(self):
+                self._t(*self._a)
+
+    monkeypatch.setattr(api_mod, "threading", _InlineThreads)
+    monkeypatch.setattr(api_mod, "_login_poster", lambda webhook, content: posts.append(content))
+
+    for row in crop_rows[:-1]:
+        r = poweruser.post(f"/api/crops/{row['crop_id']}/complete", json={"is_empty": True})
+        assert r.status_code == 200, r.text
+    assert not [p for p in posts if "queue is empty" in p], "pinged before the last crop"
+
+    last = crop_rows[-1]
+    poweruser.post(
+        "/api/masks",
+        json={"crop_id": last["crop_id"], "class_id": mite_class["class_id"],
+              "points": [[1, 1], [30, 1], [30, 30]]},
+    ).raise_for_status()
+    r = poweruser.post(f"/api/crops/{last['crop_id']}/complete", json={"is_empty": False})
+    assert r.status_code == 200, r.text
+
+    dry = [p for p in posts if "queue is empty" in p]
+    assert len(dry) == 1
+    assert "blech queue is empty" in dry[0]
+    assert "crops done" in dry[0] and "polygons" in dry[0]

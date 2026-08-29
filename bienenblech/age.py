@@ -1,10 +1,17 @@
 """Age tool API: judge the age of one instance-masked honeybee per photo.
 
-The second labeling tool behind the same login and the same store as Blech.
-Everything here deliberately reads like the Blech routes in `api.py` — same
-auth dependencies, same `_need`/`_file_etag` patterns, same store-then-insert
-upload shape via `uploads`' helpers — because two tools with two dialects in
-one codebase is how one of them rots. Three rules of its own:
+The second labeling tool behind the same login as Blech — but its OWN store
+(owner decision, modular per-tool storage): every route here rides an
+age-store connection (`db.connect_age`, i.e. `paths.age_db_path`), where
+`age_samples` lives beside the store's own `backup_runs`/`meta`, so the whole
+tool is detachable as one file and backed up on its own schedule. Users
+deliberately do NOT move: auth stays global in the main store, the session
+cookie is the only identity these routes consult, and an age connection never
+answers a login. Everything here still deliberately reads like the Blech
+routes in `api.py` — same auth dependencies, same `_need`/`_file_etag`
+patterns, same store-then-insert upload shape via `uploads`' helpers — because
+two tools with two dialects in one codebase is how one of them rots. Three
+rules of its own:
 
 *   **The scale is integer DAYS 0..28 and 28 is RIGHT-CENSORED** ("28+", four
     weeks or older). Appearance-based judgment is only meaningful across the
@@ -46,7 +53,7 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 from . import db, uploads
-from .api import _file_etag, _need, current_user, require_admin
+from .api import _file_etag, _need, current_user, notify_queue_empty, require_admin
 from .config import Config
 
 # Stored sample images are already compressed — JPEG and PNG alike (same
@@ -162,11 +169,14 @@ def create_router(config: Config) -> APIRouter:
     app-level `require_login` dependency already gates all of /api/*."""
     router = APIRouter(prefix="/api/age")
 
-    def get_con():
-        """A connection per request, closed when the response is done — its own
-        tiny copy of api.py's get_con, because that one is a closure over a
-        different Config inside create_app and closures do not export."""
-        con = db.connect(config)
+    def get_age_con():
+        """An AGE-STORE connection per request, closed when the response is
+        done — `db.connect_age`, so every route below reads and writes
+        `paths.age_db_path` and never opens the main store at all. Mirrors
+        api.py's get_con lifecycle exactly (its own tiny copy, because that one
+        is a closure over a different Config inside create_app and closures do
+        not export); only the file differs."""
+        con = db.connect_age(config)
         try:
             yield con
         finally:
@@ -175,7 +185,7 @@ def create_router(config: Config) -> APIRouter:
     @router.post("/samples")
     def upload_samples(file: list[UploadFile] = File(...),
                        user: dict = Depends(require_admin),
-                       con: Any = Depends(get_con)):
+                       con: Any = Depends(get_age_con)):
         """Land one or more bee-photo samples. ADMIN-ONLY (module docstring says
         why; Blech's upload stays open to any signed-in user).
 
@@ -246,13 +256,13 @@ def create_router(config: Config) -> APIRouter:
         return {"samples": stored, "duplicates": duplicates}
 
     @router.get("/samples")
-    def list_samples(status: str | None = None, con: Any = Depends(get_con)):
+    def list_samples(status: str | None = None, con: Any = Depends(get_age_con)):
         return [_sample_out(r) for r in db.list_age_samples(con, status=status)]
 
     # Declared before /samples/{sample_id} routes for the same Starlette
     # declaration-order reason as /api/crops/next.
     @router.get("/samples/next")
-    def next_sample(con: Any = Depends(get_con)):
+    def next_sample(con: Any = Depends(get_age_con)):
         """The queue: oldest open sample. 204 when dry — an empty queue is a
         success, and the SPA shows a different screen for it than for an error."""
         row = db.next_open_age_sample(con)
@@ -261,7 +271,7 @@ def create_router(config: Config) -> APIRouter:
         return _sample_out(row)
 
     @router.get("/samples/{sample_id}/file")
-    def sample_file(sample_id: str, request: Request, con: Any = Depends(get_con)):
+    def sample_file(sample_id: str, request: Request, con: Any = Depends(get_age_con)):
         """The sample's pixels. Cached exactly like crop files: the derivative
         at a given path is written once at upload and never rewritten, so the
         immutable ETag headers are honest."""
@@ -278,14 +288,27 @@ def create_router(config: Config) -> APIRouter:
         return FileResponse(str(path), media_type=media, headers=headers)
 
     @router.get("/samples/{sample_id}")
-    def get_sample(sample_id: str, con: Any = Depends(get_con)):
+    def get_sample(sample_id: str, con: Any = Depends(get_age_con)):
         return _sample_out(_need(db.get_age_sample(con, sample_id),
                                  "age sample", sample_id))
+
+
+    def _ping_if_dry(con) -> None:
+        """Queue-empty ping on the transition to zero open samples (see
+        api.notify_queue_empty). Annotate and flag are the only labeling
+        actions that shrink the open queue, so they are the only callers -
+        an admin delete emptying the queue is the admin's own act."""
+        st = db.age_stats(con)
+        if st["total"] > 0 and st["open"] == 0:
+            notify_queue_empty(
+                "age",
+                f"all {st['done']} samples judged, {st['flagged']} flagged",
+            )
 
     @router.post("/samples/{sample_id}/annotate")
     def annotate_sample(sample_id: str, body: AnnotateReq,
                         user: dict = Depends(current_user),
-                        con: Any = Depends(get_con)):
+                        con: Any = Depends(get_age_con)):
         """Store one answer; any signed-in user. Out-of-range age_days is a 400
         (db.annotate_age_sample raises ValueError before writing); a sample
         that is not open is a 409, because the fix is different — reopen it
@@ -296,32 +319,36 @@ def create_router(config: Config) -> APIRouter:
             raise HTTPException(
                 409, f"sample is {row['status']}, not open - reopen it first"
             )
-        return _sample_out(db.annotate_age_sample(
+        out = _sample_out(db.annotate_age_sample(
             con, sample_id, age_days=body.age_days, actor=user["username"]
         ))
+        _ping_if_dry(con)
+        return out
 
     @router.post("/samples/{sample_id}/flag")
     def flag_sample(sample_id: str, body: FlagReq | None = None,
                     user: dict = Depends(current_user),
-                    con: Any = Depends(get_con)):
+                    con: Any = Depends(get_age_con)):
         """Annotation impossible (blur, multiple bees, not a bee): out of the
         queue and out of the export. Allowed from any status, not just open —
         a reviewer who spots a bad sample already marked done must not need a
         reopen round-trip to say so."""
         _need(db.get_age_sample(con, sample_id), "age sample", sample_id)
         reason = (body.reason or "").strip() if body else ""
-        return _sample_out(db.flag_age_sample(con, sample_id, reason=reason or None))
+        out = _sample_out(db.flag_age_sample(con, sample_id, reason=reason or None))
+        _ping_if_dry(con)
+        return out
 
     @router.post("/samples/{sample_id}/reopen")
     def reopen_sample(sample_id: str, user: dict = Depends(current_user),
-                      con: Any = Depends(get_con)):
+                      con: Any = Depends(get_age_con)):
         """Back into the queue, answer and flag cleared — the provenance columns
         must describe only the answer that currently stands."""
         _need(db.get_age_sample(con, sample_id), "age sample", sample_id)
         return _sample_out(db.reopen_age_sample(con, sample_id))
 
     @router.delete("/samples/{sample_id}", dependencies=[Depends(require_admin)])
-    def delete_sample(sample_id: str, con: Any = Depends(get_con)):
+    def delete_sample(sample_id: str, con: Any = Depends(get_age_con)):
         """Hard delete, file included. Admin-only: destructive, like deleting a
         Blech image — but no ?force= gate, because a sample carries at most one
         answer, not hours of polygons. Row first, then the file (at whatever
@@ -332,11 +359,11 @@ def create_router(config: Config) -> APIRouter:
         return {"ok": True}
 
     @router.get("/stats")
-    def stats(con: Any = Depends(get_con)):
+    def stats(con: Any = Depends(get_age_con)):
         return db.age_stats(con)
 
     @router.get("/export", dependencies=[Depends(require_admin)])
-    def export_zip(con: Any = Depends(get_con)):
+    def export_zip(con: Any = Depends(get_age_con)):
         """Stream the age dataset zip. Built into a temp file (it carries every
         annotated sample's image) and unlinked by a BackgroundTask once the
         response is sent — same lifecycle as /api/export/yolo."""

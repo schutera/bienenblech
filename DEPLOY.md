@@ -225,8 +225,11 @@ docker compose up -d --build            # rebuilds the image, recreates containe
 ```
 
 The schema migrations are additive and idempotent (`ADD COLUMN IF NOT EXISTS`),
-so a new version opens the existing DuckDB file in place. Add the shared-mode
-`-f` flags to every one of these commands if you deployed in mode 2.
+so a new version opens the existing DuckDB files in place. The first boot after
+the store split moves any Age rows out of the main store into `data/age.duckdb`
+— one-time, idempotent, announced by a single log line saying how many rows
+moved; the sample images under `data/age/` stay put. Add the shared-mode `-f`
+flags to every one of these commands if you deployed in mode 2.
 
 ### Managing accounts from the host
 
@@ -254,15 +257,21 @@ recovering an admin means going through the CLI, not through a restart.
 | path | what it is | regenerable? |
 |---|---|---|
 | `data/bienenblech.duckdb` | users, images, crops, classes, masks, audit | **no** |
+| `data/age.duckdb` | the Age tool's samples and annotations | **no** |
 | `data/images/<image_id>.jpg` | the stored derivative every mask refers to | **no** |
-| `data/backups/*.zip` | rotated backup zips | no (but they are copies) |
+| `data/age/<sample_id>.<ext>` | the stored bee photo every age judgment refers to | **no** |
+| `data/backups/*.zip` | rotated backup zips, both stores | no (but they are copies) |
 | `data/cache/crops/<crop_id>.jpg` | crop tiles rendered on demand | yes — safe to delete |
 
-The DuckDB file and `data/images/` are the only irreplaceable things on the box.
-Everything else is either a copy or a cache.
+The two DuckDB files, `data/images/` and `data/age/` are the only irreplaceable
+things on the box. Everything else is either a copy or a cache. The one `./data`
+bind mount carries all of it; the compose files need no change for the second
+store.
 
-The in-app backup zips both of them on a schedule (`backup.interval_days`) into
-`data/backups/`, keeps the last `backup.keep`, and posts to Discord if
+The in-app backup runs one independent weekly job per store, each on its own
+watermark (`backup.interval_days`) into `data/backups/` —
+`bienenblech-<stamp>-<run>.zip` for Blech, `bienenblech-age-<stamp>-<run>.zip`
+for Age — keeps the last `backup.keep` of each, and posts to Discord if
 `BIENENBLECH_DISCORD_WEBHOOK` is set. It is not a substitute for having the
 directory itself backed up off-box:
 
@@ -282,21 +291,24 @@ POST /api/backup/run        (admin)  -> runs one now, returns the run summary
 GET  /api/backup/status              -> last run, next due, recent history
 ```
 
-A run that finds the store busy records `skipped` and arms no cooldown; a genuine
-failure (disk full, webhook unreachable) records `failed`, prints a
-`[bienenblech.alert] BACKUP` line and holds off for six hours without advancing
-the watermark. So `failed` in `/api/backup/status` means look at the logs;
-`skipped` means it will try again shortly.
+Each store keeps its own history, cooldown and watermark. A run that finds a
+store busy records `skipped` and arms no cooldown; a genuine failure (disk full,
+webhook unreachable) records `failed`, prints a `[bienenblech.alert] BACKUP`
+line and holds that store off for six hours without advancing its watermark —
+the other store's schedule is unaffected. So `failed` in `/api/backup/status`
+means look at the logs; `skipped` means it will try again shortly.
 
 ### Restoring from a backup zip
 
-The zip contains `bienenblech.duckdb`, the flat `masks.csv` / `classes.csv` /
-`crops.csv` exports, `images/`, and a manifest.
+Two zips, two independent restores — bringing back Blech never touches Age and
+vice versa. The Blech zip (`bienenblech-<stamp>-<run>.zip`) contains
+`bienenblech.duckdb`, the flat `images.csv` / `crops.csv` / `classes.csv` /
+`masks.csv` exports, `images/`, and a manifest:
 
 ```bash
 docker compose stop bienenblech
 
-unzip bienenblech-backup-YYYYMMDD.zip -d /tmp/restore
+unzip bienenblech-<stamp>-<run>.zip -d /tmp/restore
 cp /tmp/restore/bienenblech.duckdb data/bienenblech.duckdb
 cp -r /tmp/restore/images/. data/images/
 rm -rf data/cache/crops                  # stale tiles; re-rendered on demand
@@ -304,14 +316,31 @@ rm -rf data/cache/crops                  # stale tiles; re-rendered on demand
 docker compose start bienenblech         # entrypoint re-owns whatever root just wrote
 ```
 
-The final line matters: those `cp`s ran as root on the host, so the restored files
-are root-owned inside a directory the app writes to as uid 10001. The entrypoint
-fixes that on the next boot, which is precisely why it exists — but only on a
-boot, so restore by stopping and starting, never by copying into a running
-container.
+The snapshot deliberately carries no `users` table, so the restored store boots
+with empty accounts and seeds one admin from `BIENENBLECH_ADMIN_USER` /
+`BIENENBLECH_ADMIN_PASSWORD`, exactly like a first boot; recreate the rest on
+the Admin page.
 
-The CSVs are there for the day DuckDB cannot open the file at all: they carry
-every mask, class and crop in a format that outlives the database.
+The Age zip (`bienenblech-age-<stamp>-<run>.zip`) contains `age.duckdb`,
+`age_samples.csv`, `age/`, and a manifest — same dance, no cache to clear and
+no accounts involved:
+
+```bash
+docker compose stop bienenblech
+unzip bienenblech-age-<stamp>-<run>.zip -d /tmp/restore-age
+cp /tmp/restore-age/age.duckdb data/age.duckdb
+cp -r /tmp/restore-age/age/. data/age/
+docker compose start bienenblech
+```
+
+The final `start` matters in both: those `cp`s ran as root on the host, so the
+restored files are root-owned inside a directory the app writes to as uid 10001.
+The entrypoint fixes that on the next boot, which is precisely why it exists —
+but only on a boot, so restore by stopping and starting, never by copying into a
+running container.
+
+The CSVs are there for the day DuckDB cannot open a file at all: they carry
+every mask, class, crop and age sample in a format that outlives the database.
 
 ### File ownership in `data/`
 

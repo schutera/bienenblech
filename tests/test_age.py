@@ -170,10 +170,12 @@ def _ok(resp) -> None:
     assert 200 <= resp.status_code < 300, f"{resp.status_code}: {resp.text}"
 
 
-def _db_row(query, sample_id: str) -> dict:
-    """The sample straight from the store, for facts the API hides
-    (stored_path) or that only SQL can pin (NULLed-out columns)."""
-    rows = query(
+def _db_row(age_query, sample_id: str) -> dict:
+    """The sample straight from the AGE store — since the per-tool split,
+    `age_samples` lives in its own DuckDB file (`paths.age_db_path`), which is
+    why this reads through conftest's `age_query`, never `query`. For facts the
+    API hides (stored_path) or that only SQL can pin (NULLed-out columns)."""
+    rows = age_query(
         'SELECT status, age_days, annotated_by, annotated_at, flag_reason, '
         'stored_path, width, height, "bytes", uploaded_by, filename, sha256 '
         "FROM age_samples WHERE sample_id = ?",
@@ -196,7 +198,7 @@ def trio(admin: TestClient) -> list[str]:
 
 # ------------------------------------------------------------------- upload
 def test_admin_upload_lands_open_samples_with_true_dims_and_bytes(
-    admin: TestClient, query, tmp_path: Path
+    admin: TestClient, age_query, tmp_path: Path
 ):
     """Uploads are re-encoded like Blech frames: for an OPAQUE source the
     stored file is the JPEG derivative, and width/height/bytes describe THAT
@@ -213,7 +215,7 @@ def test_admin_upload_lands_open_samples_with_true_dims_and_bytes(
         assert row["width"] == BEE_W and row["height"] == BEE_H
         assert row["uploaded_by"] == ADMIN_USER
 
-        stored = _db_row(query, row["sample_id"])
+        stored = _db_row(age_query, row["sample_id"])
         path = Path(stored["stored_path"])
         # Sandbox alarm first: a stored_path outside tmp_path means the route
         # wrote into the real data/ despite the sandboxed config.
@@ -371,7 +373,7 @@ def test_unknown_sample_is_404_not_500(admin: TestClient):
 
 # ----------------------------------------------------------------- annotate
 def test_annotate_accepts_the_whole_scale_including_the_censored_end(
-    admin: TestClient, trio: list[str], query
+    admin: TestClient, trio: list[str], age_query
 ):
     """0, a mid-scale day, and 28 all store verbatim. 28 is not "day 28": it is
     the right-censored bucket meaning four weeks OR OLDER, so refusing it — or
@@ -379,14 +381,14 @@ def test_annotate_accepts_the_whole_scale_including_the_censored_end(
     past the polyethism window."""
     for sid, age in zip(trio, (AGE_MIN, 11, AGE_MAX)):
         _ok(_annotate(admin, sid, age))
-        row = _db_row(query, sid)
+        row = _db_row(age_query, sid)
         assert row["status"] == "done"
         assert row["age_days"] == age
         assert row["annotated_by"] == ADMIN_USER
         assert row["annotated_at"] is not None
 
 
-def test_annotate_rejects_out_of_range_days(admin: TestClient, query):
+def test_annotate_rejects_out_of_range_days(admin: TestClient, age_query):
     """29 and -1 are 400s, and a refused annotation changes nothing: the
     sample stays open with no age and no attribution."""
     sid = _upload_one(admin, 41)
@@ -395,13 +397,13 @@ def test_annotate_rejects_out_of_range_days(admin: TestClient, query):
         assert resp.status_code == 400, (
             f"age_days={bad} must be a 400, got {resp.status_code}: {resp.text}"
         )
-        row = _db_row(query, sid)
+        row = _db_row(age_query, sid)
         assert row["status"] == "open"
         assert row["age_days"] is None
         assert row["annotated_by"] is None
 
 
-def test_annotate_is_for_open_samples_only(admin: TestClient, query):
+def test_annotate_is_for_open_samples_only(admin: TestClient, age_query):
     """Single-annotator model: the first answer stands. Re-annotating a done
     sample, or annotating one that was flagged as unjudgeable, is a clean 4xx
     (409 or 400) that leaves the stored answer untouched."""
@@ -416,13 +418,13 @@ def test_annotate_is_for_open_samples_only(admin: TestClient, query):
             f"annotating a non-open sample must be a clean 4xx, got "
             f"{resp.status_code}: {resp.text}"
         )
-    assert _db_row(query, done)["age_days"] == 7
-    row = _db_row(query, flagged)
+    assert _db_row(age_query, done)["age_days"] == 7
+    row = _db_row(age_query, flagged)
     assert row["status"] == "flagged" and row["age_days"] is None
 
 
 def test_poweruser_may_annotate_flag_and_reopen(
-    poweruser: TestClient, admin: TestClient, query
+    poweruser: TestClient, admin: TestClient, age_query
 ):
     """Upload is the only age route that diverges by role. Judging bees is
     exactly as open as labeling Blech crops — powerusers are the workforce."""
@@ -430,28 +432,28 @@ def test_poweruser_may_annotate_flag_and_reopen(
     b = _upload_one(admin, 45)
 
     _ok(_annotate(poweruser, a, 16))
-    row = _db_row(query, a)
+    row = _db_row(age_query, a)
     assert row["status"] == "done"
     assert row["annotated_by"] == POWERUSER_USER, (
         "attribution must name the annotator, not the uploader"
     )
 
     _ok(_flag(poweruser, b, "wing torn off, no bee visible"))
-    assert _db_row(query, b)["status"] == "flagged"
+    assert _db_row(age_query, b)["status"] == "flagged"
 
     _ok(_reopen(poweruser, a))
     _ok(_reopen(poweruser, b))
-    assert _db_row(query, a)["status"] == "open"
-    assert _db_row(query, b)["status"] == "open"
+    assert _db_row(age_query, a)["status"] == "open"
+    assert _db_row(age_query, b)["status"] == "open"
 
 
 # -------------------------------------------------------------- flag/reopen
 def test_flag_stores_the_reason_and_leaves_the_queue(
-    admin: TestClient, query, trio: list[str]
+    admin: TestClient, age_query, trio: list[str]
 ):
     a, b, c = trio
     _ok(_flag(admin, a, "two bees in frame"))
-    row = _db_row(query, a)
+    row = _db_row(age_query, a)
     assert row["status"] == "flagged"
     assert row["flag_reason"] == "two bees in frame"
     got = _next(admin)
@@ -464,19 +466,19 @@ def test_flag_stores_the_reason_and_leaves_the_queue(
     assert c  # trio unpacking kept honest
 
 
-def test_flag_reason_is_optional(admin: TestClient, query):
+def test_flag_reason_is_optional(admin: TestClient, age_query):
     """The reason is one optional line — a poweruser facing an obvious blur
     should be one click away from the next sample, and an empty reason column
     stays NULL rather than an empty string a UI would render as a blank pill."""
     sid = _upload_one(admin, 51)
     _ok(_flag(admin, sid))
-    row = _db_row(query, sid)
+    row = _db_row(age_query, sid)
     assert row["status"] == "flagged"
     assert row["flag_reason"] in (None, ""), row["flag_reason"]
 
 
 def test_reopen_clears_annotation_and_flag_state_and_requeues(
-    admin: TestClient, query
+    admin: TestClient, age_query
 ):
     """Reopen is the undo for both exits. It must clear age, attribution AND
     flag reason: a reopened sample re-enters the queue as if never touched, and
@@ -487,14 +489,14 @@ def test_reopen_clears_annotation_and_flag_state_and_requeues(
     _ok(_flag(admin, was_flagged, "blur"))
 
     _ok(_reopen(admin, was_done))
-    row = _db_row(query, was_done)
+    row = _db_row(age_query, was_done)
     assert row["status"] == "open"
     assert row["age_days"] is None
     assert row["annotated_by"] is None
     assert row["annotated_at"] is None
 
     _ok(_reopen(admin, was_flagged))
-    row = _db_row(query, was_flagged)
+    row = _db_row(age_query, was_flagged)
     assert row["status"] == "open"
     assert row["flag_reason"] is None
 
@@ -505,14 +507,14 @@ def test_reopen_clears_annotation_and_flag_state_and_requeues(
 
 # ------------------------------------------------------------------- delete
 def test_delete_is_admin_only_and_hard(
-    admin: TestClient, poweruser: TestClient, query
+    admin: TestClient, poweruser: TestClient, age_query
 ):
     """The one hard delete in the age schema, mirroring image delete: pixels
     are re-obtainable from the masking pipeline, so admin cleanup outweighs
     soft-delete bookkeeping — but only for admins, and the file goes with the
     row so the store never accretes orphan JPEGs."""
     sid = _upload_one(admin, 61)
-    stored = Path(_db_row(query, sid)["stored_path"])
+    stored = Path(_db_row(age_query, sid)["stored_path"])
     assert stored.is_file()
 
     refused = poweruser.delete(f"/api/age/samples/{sid}")
@@ -521,7 +523,7 @@ def test_delete_is_admin_only_and_hard(
     assert len(_samples(admin)) == 1
 
     _ok(admin.delete(f"/api/age/samples/{sid}"))
-    assert query("SELECT count(*) FROM age_samples WHERE sample_id = ?", [sid]) \
+    assert age_query("SELECT count(*) FROM age_samples WHERE sample_id = ?", [sid]) \
         == [(0,)], "delete must remove the row, not flag it"
     assert not stored.exists(), "delete must remove the stored file too"
     assert _samples(admin) == []
@@ -668,71 +670,30 @@ def test_picker_examples_returns_real_ids(
     assert poweruser.get(f"/api/crops/{body['blech']}/image").status_code == 200
 
 
-# ------------------------------------------------- migration (pre-age store)
-# `images` and `users` exactly as the last PRE-AGE build created them, frozen
-# as text like test_db.py freezes its old shapes: the migration under test
-# exists because stores without `age_samples` are on disk in production, and
-# the test must keep producing that shape after db.py has moved on. Only the
-# two row-carrying tables are seeded — init_db creating the REST of the schema
-# around them is exactly the additive behavior under test.
-PRE_AGE_IMAGES_DDL = """
-    CREATE TABLE images (
-        image_id     TEXT PRIMARY KEY,
-        filename     TEXT NOT NULL,
-        sha256       TEXT NOT NULL,
-        width        INTEGER NOT NULL,
-        height       INTEGER NOT NULL,
-        stored_path  TEXT NOT NULL,
-        "bytes"      BIGINT NOT NULL,
-        crop_size    INTEGER NOT NULL,
-        crop_overlap DOUBLE  NOT NULL,
-        uploaded_by  TEXT,
-        uploaded_at  TIMESTAMP NOT NULL,
-        note         TEXT
-    );
-"""
-
-PRE_AGE_USERS_DDL = """
-    CREATE TABLE users (
-        username      TEXT PRIMARY KEY,
-        password_hash TEXT NOT NULL,
-        role          TEXT NOT NULL DEFAULT 'poweruser',
-        created_at    TIMESTAMP NOT NULL DEFAULT now()
-    );
-"""
-
-# Self-describing shape, not a real credential; byte-identity through the
-# migration is what is asserted.
-FROZEN_HASH = "scrypt$16384$8$1$" + "ab" * 16 + "$" + "cd" * 32
+# ----------------------------------------------- the age store's own schema
+# Since the per-tool split, `age_samples` lives in its OWN DuckDB file
+# (`paths.age_db_path`) and `db.init_age_db` — not `init_db` — owns its DDL.
+# These tests drive both init functions directly against brand-new files, the
+# same substrate as test_db.py, so a failure reproduces with the CLI against
+# the same file. The boot-time healing of a PRE-SPLIT main store (one that
+# still carries `age_samples`) is pinned in test_split_stores.py; down here is
+# the DDL itself.
 
 AGE_COLUMNS = {
     "sample_id", "filename", "sha256", "stored_path", "width", "height",
     "bytes", "uploaded_by", "uploaded_at", "status", "age_days",
-    "annotated_by", "annotated_at", "flag_reason",
+    "annotated_by", "annotated_at", "flag_reason", "updated_at",
 }
 
 
 @pytest.fixture()
 def mcon(tmp_path: Path) -> Iterator[duckdb.DuckDBPyConnection]:
-    """A brand-new DuckDB file under tmp_path — same substrate as test_db.py,
-    so a failure reproduces with the CLI against the same file."""
+    """A brand-new DuckDB file under tmp_path."""
     handle = duckdb.connect(str(tmp_path / "store.duckdb"))
     try:
         yield handle
     finally:
         handle.close()
-
-
-def _seed_pre_age_store(con: duckdb.DuckDBPyConnection) -> None:
-    con.execute(PRE_AGE_IMAGES_DDL)
-    con.execute(PRE_AGE_USERS_DDL)
-    con.execute(
-        "INSERT INTO images VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), ?)",
-        ["img1", "frame.png", "a" * 64, 1920, 1280,
-         "data/images/img1.jpg", 12345, 640, 0.0, "alice", None],
-    )
-    con.execute("INSERT INTO users VALUES ('alice', ?, 'poweruser', now())",
-                [FROZEN_HASH])
 
 
 def _schema_snapshot(con: duckdb.DuckDBPyConnection) -> list[tuple]:
@@ -754,18 +715,26 @@ def _insert_age_row(con: duckdb.DuckDBPyConnection, sid: str, *,
     )
 
 
-def test_init_db_adds_age_samples_to_a_pre_age_store_with_data_intact(mcon):
-    """The whole age table is the migration: a store the last pre-age build
-    wrote gains `age_samples` from `init_db` ALONE, and the rows already
-    there — the labeling hours the SPEC calls irreplaceable — ride through
-    byte-identical."""
-    _seed_pre_age_store(mcon)
-    assert mcon.execute(
-        "SELECT count(*) FROM information_schema.tables "
-        "WHERE table_name = 'age_samples'"
-    ).fetchone()[0] == 0  # the pre-age shape is real
+def test_init_age_db_builds_a_self_describing_store_with_no_users(mcon):
+    """One `init_age_db` call brings up the complete age store: `age_samples`
+    in exactly the contract's column set (updated_at included — the watermark
+    fix that rode along with the split), plus its OWN `backup_runs` and `meta`
+    so the store is self-describing and detachable. And NO `users` table,
+    ever: auth is global in the main store, and the age backup snapshot must
+    have no credentials to exclude in the first place."""
+    db.init_age_db(mcon)
 
-    db.init_db(mcon)
+    tables = {
+        str(r[0]).lower() for r in mcon.execute(
+            "SELECT table_name FROM information_schema.tables"
+        ).fetchall()
+    }
+    assert "age_samples" in tables
+    assert "backup_runs" in tables and "meta" in tables, (
+        "the age store must carry its own operational pair; without them the "
+        "age backup job would have to keep its watermark in the main file"
+    )
+    assert "users" not in tables
 
     cols = {
         r[0] for r in mcon.execute(
@@ -776,35 +745,85 @@ def test_init_db_adds_age_samples_to_a_pre_age_store_with_data_intact(mcon):
     assert cols == AGE_COLUMNS, (
         f"age_samples columns diverge from the contract: {sorted(cols)}"
     )
-    assert mcon.execute(
-        "SELECT image_id, filename, \"bytes\" FROM images"
-    ).fetchall() == [("img1", "frame.png", 12345)]
-    assert mcon.execute(
-        "SELECT username, password_hash, role FROM users"
-    ).fetchall() == [("alice", FROZEN_HASH, "poweruser")]
 
 
-def test_the_age_migration_replays_as_a_no_op(mcon):
-    """init_db runs on every boot, so the second run against a just-migrated
-    store IS the common case: same schema, same rows."""
-    _seed_pre_age_store(mcon)
+def test_init_db_no_longer_creates_age_samples_in_the_main_store(mcon):
+    """The other half of the split, at the DDL level: the MAIN store's
+    `init_db` stopped creating `age_samples` when the stores split. If it ever
+    comes back, every fresh deployment is quietly pre-split again and the
+    boot-time migration turns into a perpetual mover."""
     db.init_db(mcon)
+    assert mcon.execute(
+        "SELECT count(*) FROM information_schema.tables "
+        "WHERE table_name = 'age_samples'"
+    ).fetchone()[0] == 0, (
+        "init_db created age_samples in the main store; that table belongs to "
+        "the age store (init_age_db) since the split"
+    )
+
+
+def test_init_age_db_replays_as_a_no_op(mcon):
+    """init_age_db runs on every boot, so the second run against an existing
+    store IS the common case: same schema, same rows."""
+    db.init_age_db(mcon)
     _insert_age_row(mcon, "s1", sha="e" * 64, age=9, status="done")
     first = _schema_snapshot(mcon)
     rows = mcon.execute(
         "SELECT sample_id, age_days, status FROM age_samples"
     ).fetchall()
 
-    db.init_db(mcon)
+    db.init_age_db(mcon)
 
-    assert _schema_snapshot(mcon) == first, "replaying init_db changed the schema"
+    assert _schema_snapshot(mcon) == first, (
+        "replaying init_age_db changed the schema"
+    )
     assert mcon.execute(
         "SELECT sample_id, age_days, status FROM age_samples"
     ).fetchall() == rows
 
 
+def test_init_age_db_adds_updated_at_to_a_store_from_before_the_column(mcon):
+    """The additive migration inside the age store itself: an age store
+    written before `updated_at` existed (its DDL frozen below, exactly the
+    pre-watermark-fix shape) reaches the current schema on the next
+    init_age_db, rows intact and the new column NULL — 'never touched since
+    upload', which is what max(uploaded_at, updated_at) must read for them."""
+    mcon.execute("""
+        CREATE TABLE age_samples (
+            sample_id    TEXT PRIMARY KEY,
+            filename     TEXT NOT NULL,
+            sha256       TEXT NOT NULL UNIQUE,
+            stored_path  TEXT NOT NULL,
+            width        INTEGER NOT NULL,
+            height       INTEGER NOT NULL,
+            "bytes"      BIGINT NOT NULL,
+            uploaded_by  TEXT,
+            uploaded_at  TIMESTAMP NOT NULL,
+            status       TEXT NOT NULL DEFAULT 'open',
+            age_days     INTEGER CHECK (age_days BETWEEN 0 AND 28),
+            annotated_by TEXT,
+            annotated_at TIMESTAMP,
+            flag_reason  TEXT
+        );
+    """)
+    _insert_age_row(mcon, "old1", sha="d" * 64, age=14, status="done")
+
+    db.init_age_db(mcon)
+
+    cols = {
+        r[0] for r in mcon.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'age_samples'"
+        ).fetchall()
+    }
+    assert cols == AGE_COLUMNS
+    assert mcon.execute(
+        "SELECT sample_id, age_days, status, updated_at FROM age_samples"
+    ).fetchall() == [("old1", 14, "done", None)]
+
+
 def test_age_schema_enforces_range_bigint_and_dedupe(mcon):
-    """The three DDL-level teeth of the contract, on a fresh store:
+    """The three DDL-level teeth of the contract, on a fresh age store:
 
     - `age_days` CHECK 0..28 — the DB refuses an out-of-scale day even if some
       future writer forgets the API-level guard;
@@ -813,7 +832,7 @@ def test_age_schema_enforces_range_bigint_and_dedupe(mcon):
     - `sha256` UNIQUE — the dedupe answer rests on the constraint, not on a
       read-then-write race.
     """
-    db.init_db(mcon)
+    db.init_age_db(mcon)
 
     bytes_type = mcon.execute(
         "SELECT data_type FROM information_schema.columns "
@@ -829,3 +848,50 @@ def test_age_schema_enforces_range_bigint_and_dedupe(mcon):
         _insert_age_row(mcon, "negative", sha="4" * 64, age=-1, status="done")
     with pytest.raises(duckdb.Error):
         _insert_age_row(mcon, "dupe", sha="1" * 64)  # same sha as ok_low
+
+
+# ------------------------------------------------------------ queue-empty ping
+# Owner request (2026-08-29): one Discord ping when a tool's labeling queue
+# runs dry, naming the database. It fires on the TRANSITION to zero open
+# samples - the action that empties a queue cannot repeat while it stays
+# empty, so no debounce state exists to get wrong.
+
+def _capture_pings(monkeypatch):
+    from bienenblech import api as api_mod
+    posts: list[str] = []
+    monkeypatch.setenv(api_mod.WEBHOOK_ENV, "https://discord.invalid/api/webhooks/1/testtoken")
+
+    class _InlineThreads:
+        class Thread:
+            def __init__(self, *, target, args=(), name=None, daemon=None):
+                self._t, self._a = target, args
+            def start(self):
+                self._t(*self._a)
+
+    monkeypatch.setattr(api_mod, "threading", _InlineThreads)
+    monkeypatch.setattr(api_mod, "_login_poster", lambda webhook, content: posts.append(content))
+    return posts
+
+
+def test_last_annotation_pings_queue_empty(admin: TestClient, poweruser: TestClient, monkeypatch):
+    posts = _capture_pings(monkeypatch)
+    up = _upload(admin, [("a.png", bee_cutout_bytes()), ("b.png", bee_cutout_bytes(seed=7))]).json()
+    ids = [s["sample_id"] for s in up["samples"]]
+    poweruser.post(f"/api/age/samples/{ids[0]}/annotate", json={"age_days": 5}).raise_for_status()
+    assert not [p for p in posts if "queue is empty" in p], "pinged before the queue was dry"
+    poweruser.post(f"/api/age/samples/{ids[1]}/flag", json={"reason": "blurred"}).raise_for_status()
+    dry = [p for p in posts if "queue is empty" in p]
+    assert len(dry) == 1
+    assert "age queue is empty" in dry[0]
+    assert "1 samples judged" in dry[0] and "1 flagged" in dry[0]
+
+
+def test_reopen_then_refinish_pings_again(admin: TestClient, poweruser: TestClient, monkeypatch):
+    """A queue refilled and emptied again has genuinely finished twice."""
+    posts = _capture_pings(monkeypatch)
+    up = _upload(admin, [("solo.png", bee_cutout_bytes())]).json()
+    sid = up["samples"][0]["sample_id"]
+    poweruser.post(f"/api/age/samples/{sid}/annotate", json={"age_days": 3}).raise_for_status()
+    poweruser.post(f"/api/age/samples/{sid}/reopen").raise_for_status()
+    poweruser.post(f"/api/age/samples/{sid}/annotate", json={"age_days": 4}).raise_for_status()
+    assert len([p for p in posts if "age queue is empty" in p]) == 2

@@ -28,6 +28,18 @@ type (`stored_path`, `sha256`, `bytes`, `image_id` on crops and masks) because
 the API needs them to serve files and delete them; they are additive, so the
 frontend types stay accurate about what they read.
 
+**Two stores, one per tool (owner decision).** `paths.db_path` is the MAIN
+store: users, every Blech table (images/crops/classes/masks), and its own
+`backup_runs`/`meta`. `paths.age_db_path` is the AGE store: `age_samples` plus
+its OWN `backup_runs` and `meta` — each store is self-describing and detachable,
+and each gets its own independent weekly backup. Users deliberately stay GLOBAL
+in the main store: one login, one role, everywhere. The age helpers below run
+against whatever connection they are handed — the caller (api.py's `get_con` /
+age.py's `get_age_con`) decides which file that is, and there is no
+cross-database ATTACH anywhere. A main store from before the split still
+carrying `age_samples` is healed once at boot by
+`migrate_legacy_age_samples`.
+
 Timestamps are written with DuckDB's `now()` everywhere — never Python's clock.
 Mixing the two would leave the backup watermark comparing a local wall clock
 against a UTC one, which fails only on machines whose TZ is not UTC, i.e. every
@@ -132,20 +144,13 @@ def is_transient_lock_error(exc: Exception) -> bool:
             or "being used by another process" in msg)  # Windows sharing violation
 
 
-def connect(config: Config, *, read_only: bool = False) -> duckdb.DuckDBPyConnection:
-    """Open the store, retrying past the transient file-handle conflict.
+def _connect_path(db_path: str, *, read_only: bool = False) -> duckdb.DuckDBPyConnection:
+    """The shared retry loop behind `connect` and `connect_age`.
 
-    The app opens a short-lived connection per request and closes it right after,
-    rather than holding a process-wide singleton: that keeps the file free
-    between operations for the CLI and for the backup thread, which open it from
-    their own connections. The cost is that concurrent requests occasionally
-    collide on open, which the bounded retry turns into a sub-second wait instead
-    of a hard 500.
-
-    Raises `DbBusy` when the budget is exhausted, chaining the real DuckDB error
-    so the log still shows which lock message was hit.
+    One implementation on purpose: the retry budget, the backoff curve and the
+    `DbBusy` wording must stay identical for both stores, or the two files
+    develop different failure behaviour under the same contention.
     """
-    db_path = config.paths.db_path
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     delay = _CONNECT_DELAY
     last: Exception | None = None
@@ -164,9 +169,94 @@ def connect(config: Config, *, read_only: bool = False) -> duckdb.DuckDBPyConnec
     ) from last
 
 
+def connect(config: Config, *, read_only: bool = False) -> duckdb.DuckDBPyConnection:
+    """Open the MAIN store (users + Blech tables), retrying past the transient
+    file-handle conflict.
+
+    The app opens a short-lived connection per request and closes it right after,
+    rather than holding a process-wide singleton: that keeps the file free
+    between operations for the CLI and for the backup thread, which open it from
+    their own connections. The cost is that concurrent requests occasionally
+    collide on open, which the bounded retry turns into a sub-second wait instead
+    of a hard 500.
+
+    Raises `DbBusy` when the budget is exhausted, chaining the real DuckDB error
+    so the log still shows which lock message was hit.
+    """
+    return _connect_path(config.paths.db_path, read_only=read_only)
+
+
+def connect_age(config: Config, *, read_only: bool = False) -> duckdb.DuckDBPyConnection:
+    """Open the AGE store (`paths.age_db_path`): `age_samples` plus its own
+    `backup_runs` and `meta`. Same lifecycle, retry budget and `DbBusy` contract
+    as `connect` — the two stores are peers, not a primary and a sidecar."""
+    return _connect_path(config.paths.age_db_path, read_only=read_only)
+
+
 # --------------------------------------------------------------------------- DDL
+def ensure_ops_tables(con: duckdb.DuckDBPyConnection) -> None:
+    """Create the per-store operational tables: `backup_runs` and `meta`.
+    Idempotent, additive.
+
+    Factored out — not copy-pasted — because BOTH stores carry their own pair
+    (the modularity contract: each store is self-describing and detachable, with
+    its own watermark and its own run history), and a drifted column between the
+    two would make the backup code lie about one of them. `init_db` and
+    `init_age_db` both call this; backup.py's `ensure_backup_tables` keeps its
+    own deliberate copy for the CLI-rescue path (see its comment) — keep the
+    shapes textually in step.
+    """
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS backup_runs (
+            run_id      TEXT PRIMARY KEY,
+            started_at  TIMESTAMP,
+            finished_at TIMESTAMP,
+            status      TEXT,                  -- 'running' | 'ok' | 'failed' (A12). Never
+                                               -- 'skipped': by the contention rule a skip
+                                               -- writes no row at all, and 'running' is the
+                                               -- in-flight claim the mutex lease is built on
+            trigger     TEXT,                  -- 'schedule' | 'manual' | 'cli'
+            n_masks     BIGINT,
+            n_images    BIGINT,
+            "bytes"     BIGINT,
+            zip_path    TEXT,
+            delivered   BOOLEAN,
+            delivery    TEXT,                  -- WHY the channel is or is not showing a zip
+                                               -- (A13): 'posted' | 'posted_summary' |
+                                               -- 'disabled' | 'skipped'; delivered alone
+                                               -- collapses all the quiet cases to false
+            error       TEXT,                  -- redacted before it is stored: it ends up
+                                               -- inside the zip that is posted to Discord
+            host        TEXT
+        );
+        """
+    )
+    # A13: `delivered BOOLEAN` records THAT the zip arrived but not what
+    # happened instead when it did not, so `delivery TEXT` carries the reason.
+    # backup.ensure_backup_tables carries this same ALTER on purpose, not by
+    # accident: the backup CLI must be able to rescue the labels from a box
+    # whose server has never booted against this store, so it cannot assume this
+    # function already ran. Both copies are ADD COLUMN IF NOT EXISTS — whichever
+    # runs second is a no-op.
+    con.execute("ALTER TABLE backup_runs ADD COLUMN IF NOT EXISTS delivery TEXT")
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY, value TEXT   -- 'schema_version', 'backup_watermark'
+        );
+        """
+    )
+
+
 def init_db(con: duckdb.DuckDBPyConnection) -> None:
-    """Create or upgrade the whole schema. Idempotent; safe on every boot.
+    """Create or upgrade the MAIN store's schema. Idempotent; safe on every boot.
+
+    The main store is users + all Blech tables + its own backup_runs/meta.
+    `age_samples` lives in the separate AGE store (`init_age_db`) — this
+    function stopped creating it when the stores split, and a pre-split main
+    store that still carries it is healed by `migrate_legacy_age_samples` at
+    boot, not here.
 
     Ordering is a discipline, not a preference: sequences, then `CREATE TABLE IF
     NOT EXISTS`, then the additive-migration block, then indexes, then meta. A
@@ -258,6 +348,77 @@ def init_db(con: duckdb.DuckDBPyConnection) -> None:
         );
         """
     )
+    # age_samples deliberately ABSENT here: it belongs to the AGE store
+    # (init_age_db). Creating it in both would resurrect the pre-split layout
+    # on every boot and make the one-time migration below run forever.
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS class_audit (
+            audit_id TEXT PRIMARY KEY,
+            class_id TEXT,
+            action   TEXT,
+            detail   JSON,
+            actor    TEXT,
+            "at"     TIMESTAMP NOT NULL        -- quoted: AT is a DuckDB keyword
+        );
+        """
+    )
+    # backup_runs + meta: this store's own operational pair, shared DDL with the
+    # age store via ensure_ops_tables (which also carries the A13 delivery ALTER).
+    ensure_ops_tables(con)
+
+    # --- additive migrations -------------------------------------------------
+    # Every schema change edits the CREATE TABLE above (a fresh store is born in
+    # the current shape) AND adds an idempotent statement here, left in place
+    # forever: a store created by an older build reaches the same shape only by
+    # replaying this block on boot. Everything below must therefore be a no-op
+    # against all three store ages — fresh, already-migrated, and old.
+
+    # A2: images."bytes" was INTEGER in the original DDL — 32-bit, ~2.147 GB,
+    # one `upload.max_mb` config bump away from silently overflowing. Retype to
+    # BIGINT. Guarded by a type probe rather than run unconditionally because
+    # DuckDB (1.4.4) refuses ALTER COLUMN on a table carrying ANY index with a
+    # DependencyException — and idx_images_sha exists on every store that has
+    # booted before. When the retype is genuinely needed the index is dropped
+    # first; the index block below re-creates it later in this same call.
+    bytes_type = con.execute(
+        "SELECT type FROM pragma_table_info('images') WHERE name = 'bytes'"
+    ).fetchone()
+    if bytes_type is not None and bytes_type[0] != "BIGINT":
+        con.execute("DROP INDEX IF EXISTS idx_images_sha")
+        con.execute('ALTER TABLE images ALTER COLUMN "bytes" SET DATA TYPE BIGINT')
+
+    # Age tool: `age_samples` moved OUT of this store into `paths.age_db_path`.
+    # The copy-then-drop is deliberately NOT in this block: it needs a second
+    # connection (the age store's), and init_db's contract is one connection,
+    # one store. It lives in `migrate_legacy_age_samples`, called by the boot
+    # block in api.create_app after both stores are initialised.
+
+    # --- indexes -------------------------------------------------------------
+    # These three mask indexes are what keep the labeling screen honest: every
+    # crop load counts masks by crop_id, the image list counts by image_id, and
+    # the stats page groups by class_id.
+    con.execute("CREATE INDEX IF NOT EXISTS idx_masks_crop ON masks(crop_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_masks_image ON masks(image_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_masks_class ON masks(class_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_crops_image ON crops(image_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_crops_status ON crops(status)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_images_sha ON images(sha256)")
+    # idx_age_status lives in the AGE store now, created by init_age_db.
+
+    set_meta(con, "schema_version", str(SCHEMA_VERSION))
+
+
+def init_age_db(con: duckdb.DuckDBPyConnection) -> None:
+    """Create or upgrade the AGE store's schema. Idempotent; safe on every boot.
+
+    Same ordering discipline as `init_db`: CREATE TABLE IF NOT EXISTS, the
+    operational pair, additive migrations, indexes, meta. The store carries NO
+    users table — auth is global and lives in the main store, so an age
+    connection can never answer a login — and its own `backup_runs`/`meta` so
+    the age backup job has its own watermark, its own run history and its own
+    claim row without ever touching the main file.
+    """
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS age_samples (
@@ -282,106 +443,89 @@ def init_db(con: duckdb.DuckDBPyConnection) -> None:
             age_days     INTEGER CHECK (age_days BETWEEN 0 AND 28),
             annotated_by TEXT,                 -- single-annotator model, like crops:
             annotated_at TIMESTAMP,            -- one sample, one answer, done
-            flag_reason  TEXT                  -- why annotation was impossible
+            flag_reason  TEXT,                 -- why annotation was impossible
+            -- Stamped by annotate, flag AND reopen. Exists for the backup
+            -- watermark: a flag writes no annotated_at, so without this a
+            -- flag-only week looks like an idle store and never triggers a
+            -- backup. The age watermark is max(uploaded_at, updated_at).
+            updated_at   TIMESTAMP
         );
         """
     )
-    con.execute(
-        """
-        CREATE TABLE IF NOT EXISTS class_audit (
-            audit_id TEXT PRIMARY KEY,
-            class_id TEXT,
-            action   TEXT,
-            detail   JSON,
-            actor    TEXT,
-            "at"     TIMESTAMP NOT NULL        -- quoted: AT is a DuckDB keyword
-        );
-        """
-    )
-    con.execute(
-        """
-        CREATE TABLE IF NOT EXISTS backup_runs (
-            run_id      TEXT PRIMARY KEY,
-            started_at  TIMESTAMP,
-            finished_at TIMESTAMP,
-            status      TEXT,                  -- 'running' | 'ok' | 'failed' (A12). Never
-                                               -- 'skipped': by the contention rule a skip
-                                               -- writes no row at all, and 'running' is the
-                                               -- in-flight claim the mutex lease is built on
-            trigger     TEXT,                  -- 'schedule' | 'manual' | 'cli'
-            n_masks     BIGINT,
-            n_images    BIGINT,
-            "bytes"     BIGINT,
-            zip_path    TEXT,
-            delivered   BOOLEAN,
-            delivery    TEXT,                  -- WHY the channel is or is not showing a zip
-                                               -- (A13): 'posted' | 'posted_summary' |
-                                               -- 'disabled' | 'skipped'; delivered alone
-                                               -- collapses all the quiet cases to false
-            error       TEXT,                  -- redacted before it is stored: it ends up
-                                               -- inside the zip that is posted to Discord
-            host        TEXT
-        );
-        """
-    )
-    con.execute(
-        """
-        CREATE TABLE IF NOT EXISTS meta (
-            key TEXT PRIMARY KEY, value TEXT   -- 'schema_version', 'backup_watermark'
-        );
-        """
-    )
+    ensure_ops_tables(con)
 
     # --- additive migrations -------------------------------------------------
-    # Every schema change edits the CREATE TABLE above (a fresh store is born in
-    # the current shape) AND adds an idempotent statement here, left in place
-    # forever: a store created by an older build reaches the same shape only by
-    # replaying this block on boot. Everything below must therefore be a no-op
-    # against all three store ages — fresh, already-migrated, and old.
-
-    # A13: `delivered BOOLEAN` records THAT the zip arrived but not what
-    # happened instead when it did not, so `delivery TEXT` carries the reason.
-    # backup.ensure_backup_tables carries this same ALTER on purpose, not by
-    # accident: the backup CLI must be able to rescue the labels from a box
-    # whose server has never booted against this store, so it cannot assume this
-    # block already ran. Both copies are ADD COLUMN IF NOT EXISTS — whichever
-    # runs second is a no-op. Keep them textually in step.
-    con.execute("ALTER TABLE backup_runs ADD COLUMN IF NOT EXISTS delivery TEXT")
-
-    # A2: images."bytes" was INTEGER in the original DDL — 32-bit, ~2.147 GB,
-    # one `upload.max_mb` config bump away from silently overflowing. Retype to
-    # BIGINT. Guarded by a type probe rather than run unconditionally because
-    # DuckDB (1.4.4) refuses ALTER COLUMN on a table carrying ANY index with a
-    # DependencyException — and idx_images_sha exists on every store that has
-    # booted before. When the retype is genuinely needed the index is dropped
-    # first; the index block below re-creates it later in this same call.
-    bytes_type = con.execute(
-        "SELECT type FROM pragma_table_info('images') WHERE name = 'bytes'"
-    ).fetchone()
-    if bytes_type is not None and bytes_type[0] != "BIGINT":
-        con.execute("DROP INDEX IF EXISTS idx_images_sha")
-        con.execute('ALTER TABLE images ALTER COLUMN "bytes" SET DATA TYPE BIGINT')
-
-    # Age tool: the whole `age_samples` table is the migration. A NEW table
-    # arrives via its `CREATE TABLE IF NOT EXISTS` above — idempotent against
-    # all three store ages — so nothing extra belongs here; this note exists so
-    # the next migration author does not go looking for a missing ALTER.
+    # Same contract as init_db's block: every statement idempotent, left in
+    # place forever. `updated_at` is in the CREATE above (a fresh age store is
+    # born with it) AND here, so an age store snapshotted before the column
+    # existed still reaches the current shape on boot.
+    con.execute("ALTER TABLE age_samples ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP")
 
     # --- indexes -------------------------------------------------------------
-    # These three mask indexes are what keep the labeling screen honest: every
-    # crop load counts masks by crop_id, the image list counts by image_id, and
-    # the stats page groups by class_id.
-    con.execute("CREATE INDEX IF NOT EXISTS idx_masks_crop ON masks(crop_id)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_masks_image ON masks(image_id)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_masks_class ON masks(class_id)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_crops_image ON crops(image_id)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_crops_status ON crops(status)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_images_sha ON images(sha256)")
     # The Age queue and the AgeHome status pills both filter by status; the
     # sha256 dedupe lookup rides the UNIQUE constraint's own index.
     con.execute("CREATE INDEX IF NOT EXISTS idx_age_status ON age_samples(status)")
 
     set_meta(con, "schema_version", str(SCHEMA_VERSION))
+
+
+# The pre-split age_samples column list, verbatim. The legacy table has no
+# updated_at — migrated rows land with it NULL, which the watermark's
+# max(uploaded_at, updated_at) treats as "never touched since upload": correct.
+_LEGACY_AGE_COLUMNS = (
+    'sample_id, filename, sha256, stored_path, width, height, "bytes", '
+    "uploaded_by, uploaded_at, status, age_days, annotated_by, annotated_at, "
+    "flag_reason"
+)
+
+
+def migrate_legacy_age_samples(
+    main_con: duckdb.DuckDBPyConnection, age_con: duckdb.DuckDBPyConnection
+) -> int:
+    """One-time copy-then-drop of a pre-split main store's `age_samples`.
+
+    If the MAIN store still carries an `age_samples` table (the layout before
+    the stores split), its rows are copied into the AGE store — skipping
+    sample_ids already present, which is what makes a crash mid-copy
+    resume-safe: the next boot copies only the remainder — and the table is
+    then DROPPED from the main store. Rows only; the sample image files under
+    data/age/ stay exactly where they are, because `stored_path` is a filesystem
+    path and the filesystem did not move.
+
+    Returns the number of rows moved and prints one line saying so. Idempotent:
+    once the drop lands, the probe below misses and every later boot is silent —
+    as is a store that was never pre-split. Each row insert autocommits, so a
+    partial copy never leaves the age store half-written mid-row.
+    """
+    legacy = main_con.execute(
+        "SELECT count(*) FROM information_schema.tables "
+        "WHERE table_schema = 'main' AND table_name = 'age_samples'"
+    ).fetchone()[0]
+    if not legacy:
+        return 0
+    rows = main_con.execute(
+        f"SELECT {_LEGACY_AGE_COLUMNS} FROM age_samples ORDER BY sample_id"
+    ).fetchall()
+    present = {
+        r[0] for r in age_con.execute("SELECT sample_id FROM age_samples").fetchall()
+    }
+    moved = 0
+    for row in rows:
+        if row[0] in present:
+            continue
+        age_con.execute(
+            f"INSERT INTO age_samples ({_LEGACY_AGE_COLUMNS}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            list(row),
+        )
+        moved += 1
+    main_con.execute("DROP TABLE age_samples")
+    print(
+        f"[bienenblech.db] AGE MIGRATION: moved {moved} age sample row(s) from the "
+        "main store to the age store and dropped the legacy table",
+        flush=True,
+    )
+    return moved
 
 
 # ----------------------------------------------------------------------- helpers
@@ -1027,10 +1171,19 @@ def soft_delete_mask(con: duckdb.DuckDBPyConnection, mask_id: str) -> None:
 # status guard for annotate (only an 'open' sample takes an answer) is the
 # API's, same split as the crop completeness invariant (A1): these helpers
 # store what they are told.
+#
+# Every helper below runs against WHATEVER connection it is handed. Since the
+# stores split, that connection is the AGE store's (db.connect_age, via age.py's
+# get_age_con) — the helpers themselves neither know nor care, which is what
+# keeps them testable against a scratch file and honest about doing no
+# cross-store reads. annotate/flag/reopen all stamp `updated_at = now()`: it is
+# the age backup watermark's second leg (max(uploaded_at, updated_at)), and a
+# flag stamps no other timestamp, so without it a flag-only week would never
+# trigger a backup.
 _AGE_COLS = """
     a.sample_id, a.filename, a.sha256, a.stored_path, a.width, a.height,
     a."bytes", a.uploaded_by, a.uploaded_at, a.status, a.age_days,
-    a.annotated_by, a.annotated_at, a.flag_reason
+    a.annotated_by, a.annotated_at, a.flag_reason, a.updated_at
 """
 
 _AGE_FIELDS: tuple[str, ...] = (
@@ -1122,9 +1275,10 @@ def annotate_age_sample(
     con: duckdb.DuckDBPyConnection, sample_id: str, *, age_days: int, actor: str | None
 ) -> dict[str, Any]:
     """Store one answer: status 'done', the age, and who/when. Clears any stale
-    flag_reason so the row never says both "done" and "impossible". Range is
-    validated here as a backstop to the CHECK constraint; the open-status guard
-    lives in the API, where it can answer 409."""
+    flag_reason so the row never says both "done" and "impossible". Stamps
+    `updated_at` for the backup watermark. Range is validated here as a
+    backstop to the CHECK constraint; the open-status guard lives in the API,
+    where it can answer 409."""
     days = int(age_days)
     if not 0 <= days <= AGE_MAX_DAYS:
         raise ValueError(
@@ -1135,7 +1289,8 @@ def annotate_age_sample(
         raise NotFound(f"unknown age sample {sample_id!r}")
     con.execute(
         "UPDATE age_samples SET status = 'done', age_days = ?, annotated_by = ?, "
-        "annotated_at = now(), flag_reason = NULL WHERE sample_id = ?",
+        "annotated_at = now(), flag_reason = NULL, updated_at = now() "
+        "WHERE sample_id = ?",
         [days, actor, sample_id],
     )
     row = get_age_sample(con, sample_id)
@@ -1149,12 +1304,15 @@ def flag_age_sample(
     """Mark a sample unanswerable (blur, multiple bees, not a bee): it leaves
     the queue as 'flagged'. Any stored answer is cleared too — the export
     filters by status anyway, but a row carrying both an age and a flag would
-    lie to whoever reads the backup CSV."""
+    lie to whoever reads the backup CSV. Stamps `updated_at` — the ONLY
+    timestamp a flag writes, which is exactly why the column exists: a
+    flag-only week must still move the backup watermark."""
     if get_age_sample(con, sample_id) is None:
         raise NotFound(f"unknown age sample {sample_id!r}")
     con.execute(
         "UPDATE age_samples SET status = 'flagged', flag_reason = ?, age_days = NULL, "
-        "annotated_by = NULL, annotated_at = NULL WHERE sample_id = ?",
+        "annotated_by = NULL, annotated_at = NULL, updated_at = now() "
+        "WHERE sample_id = ?",
         [reason, sample_id],
     )
     row = get_age_sample(con, sample_id)
@@ -1165,12 +1323,15 @@ def flag_age_sample(
 def reopen_age_sample(con: duckdb.DuckDBPyConnection, sample_id: str) -> dict[str, Any]:
     """Back into the queue: clears age, flag and attribution, so the provenance
     columns always describe the answer that currently stands rather than one
-    that was undone — same rule as reopening a crop."""
+    that was undone — same rule as reopening a crop. Stamps `updated_at`: a
+    reopen is a change of state the backup must capture (the answer it archived
+    last week no longer stands)."""
     if get_age_sample(con, sample_id) is None:
         raise NotFound(f"unknown age sample {sample_id!r}")
     con.execute(
         "UPDATE age_samples SET status = 'open', age_days = NULL, annotated_by = NULL, "
-        "annotated_at = NULL, flag_reason = NULL WHERE sample_id = ?",
+        "annotated_at = NULL, flag_reason = NULL, updated_at = now() "
+        "WHERE sample_id = ?",
         [sample_id],
     )
     row = get_age_sample(con, sample_id)
@@ -1222,25 +1383,32 @@ def age_stats(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     }
 
 
-def picker_examples(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
-    """One representative id per tool for the picker tiles:
-    `{"blech": crop_id | None, "age": sample_id | None}`.
+def picker_example_blech(con: duckdb.DuckDBPyConnection) -> str | None:
+    """One representative crop_id for the picker's Blech tile, or None.
 
-    Blech prefers the most recently completed crop — a done crop is guaranteed
-    to show real reviewed content — and falls back to any crop; Age takes the
-    newest sample. Null-safe when a tool is empty, so the picker can render its
-    quiet fallback tile instead of erroring. Lives here rather than in either
-    tool's module because it is the one query that reads both tools' tables."""
-    blech = con.execute(
+    Prefers the most recently completed crop — a done crop is guaranteed to
+    show real reviewed content — and falls back to any crop. Half of what used
+    to be one `picker_examples` query: since the stores split it CANNOT read
+    the age table (that is a different file on a different connection, and
+    there is no cross-database ATTACH), so each tool answers for itself on its
+    own connection and api.py's picker endpoint merges the two."""
+    row = con.execute(
         "SELECT crop_id FROM crops WHERE status = 'done' "
         "ORDER BY completed_at DESC, crop_id LIMIT 1"
     ).fetchone() or con.execute(
         "SELECT crop_id FROM crops ORDER BY crop_id LIMIT 1"
     ).fetchone()
-    age = con.execute(
+    return row[0] if row else None
+
+
+def picker_example_age(con: duckdb.DuckDBPyConnection) -> str | None:
+    """One representative sample_id for the picker's Age tile, or None — the
+    newest sample. Runs on an AGE-store connection; see `picker_example_blech`
+    for why the two halves are separate functions."""
+    row = con.execute(
         "SELECT sample_id FROM age_samples ORDER BY uploaded_at DESC, sample_id LIMIT 1"
     ).fetchone()
-    return {"blech": blech[0] if blech else None, "age": age[0] if age else None}
+    return row[0] if row else None
 
 
 # ------------------------------------------------------------------------- stats
