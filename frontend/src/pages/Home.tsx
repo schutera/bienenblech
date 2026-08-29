@@ -81,7 +81,7 @@ function CropGrid({ crops }: { crops: CropSummary[] }) {
         <button
           key={c.crop_id}
           type="button"
-          onClick={() => navigate(`/label/${c.crop_id}`)}
+          onClick={() => navigate(`/blech/label/${c.crop_id}`)}
           title={`Row ${c.row_idx + 1}, column ${c.col_idx + 1} — ${
             c.status === "done" ? (c.is_empty ? "done, empty" : "done") : "open"
           }, ${c.n_masks} polygon${c.n_masks === 1 ? "" : "s"}`}
@@ -476,7 +476,7 @@ export default function Home() {
           </p>
         </div>
         <div className="flex flex-col items-start gap-2">
-          <Button size="lg" onClick={() => navigate("/label")}>
+          <Button size="lg" onClick={() => navigate("/blech/label")}>
             Start labeling
           </Button>
           <span className="text-[12px] text-gray-tertiary">

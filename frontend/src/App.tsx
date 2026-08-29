@@ -1,7 +1,19 @@
-import { BrowserRouter, Navigate, NavLink, Route, Routes, useLocation } from "react-router-dom";
+import {
+  BrowserRouter,
+  Link,
+  Navigate,
+  NavLink,
+  Route,
+  Routes,
+  useLocation,
+  useParams,
+} from "react-router-dom";
 import { AuthProvider, RequireAdmin, RequireAuth, useAuth } from "./lib/auth";
+import Picker from "./pages/Picker";
 import Home from "./pages/Home";
 import Label from "./pages/Label";
+import AgeHome from "./pages/AgeHome";
+import AgeLabel from "./pages/AgeLabel";
 import Admin from "./pages/Admin";
 import Login from "./pages/Login";
 
@@ -50,44 +62,77 @@ function UserMenu() {
 }
 
 /**
+ * Which tool the current URL sits inside. The nav and the wordmark subtitle
+ * hang off this: each tool shows only its own Overview/Label pair, and the
+ * picker (or /admin, which is global) shows neither.
+ */
+function toolOf(pathname: string): "blech" | "age" | null {
+  if (pathname === "/blech" || pathname.startsWith("/blech/")) return "blech";
+  if (pathname === "/age" || pathname.startsWith("/age/")) return "age";
+  return null;
+}
+
+/** /label/:cropId predates the picker; deep links into a crop stay alive. */
+function LegacyLabelRedirect() {
+  const { cropId } = useParams<{ cropId: string }>();
+  return <Navigate to={cropId ? `/blech/label/${cropId}` : "/blech/label"} replace />;
+}
+
+/**
  * The signed-in shell. Its header height is mirrored by --app-header-h in
- * index.css (40px mark + py-4 + 1px border): the Label screen parks the crop
- * progress bar — which carries the completeness rule — directly beneath it, and
- * that bar must never scroll out of view. Change one, change the other.
+ * index.css (40px mark + py-4 + 1px border): the Blech Label screen parks the
+ * crop progress bar — which carries the completeness rule — directly beneath
+ * it, and that bar must never scroll out of view. Change one, change the other.
  */
 function Shell() {
   const { isAdmin } = useAuth();
   const { pathname } = useLocation();
-  // The Label route is the exception to the centred column: the crop deserves
-  // the viewport, so it gets full width and a much shallower vertical rhythm.
-  const labeling = pathname.startsWith("/label");
-  // No top padding while labeling: the crop-progress bar sticks flush under the
-  // header, so nothing can scroll through a gap between the two.
+  const tool = toolOf(pathname);
+  // Both Label routes are the exception to the centred column: the image under
+  // judgment deserves the viewport, so they get full width and a much
+  // shallower vertical rhythm.
+  const labeling = pathname.startsWith("/blech/label") || pathname.startsWith("/age/label");
+  // No top padding while labeling: Blech's crop-progress bar sticks flush
+  // under the header, so nothing can scroll through a gap between the two.
   const mainCls = labeling
     ? "px-4 sm:px-6 pb-6"
     : "max-w-[1400px] mx-auto px-6 sm:px-10 py-10 sm:py-12";
+  // The subtitle names the tool the user is inside; the picker and the global
+  // /admin get the umbrella line. Blech's line stays free of bee vocabulary.
+  const subtitle =
+    tool === "blech"
+      ? "polygon labeling for YOLO-seg"
+      : tool === "age"
+        ? "honeybee age annotation"
+        : "annotation tools";
 
   return (
     <>
       <header className="sticky top-0 z-50 border-b border-border bg-bg">
         <div className="flex justify-between items-center px-6 sm:px-10 py-4 gap-4">
-          <div className="flex items-center gap-3">
+          <Link to="/" className="flex items-center gap-3">
             <Mark />
             <div>
               <div className="font-sans text-xl text-near-black leading-none">Bienenblech</div>
               <div className="text-[11px] font-mono uppercase tracking-[0.18em] text-gray-tertiary mt-1">
-                polygon labeling for YOLO-seg
+                {subtitle}
               </div>
             </div>
-          </div>
+          </Link>
           <nav className="flex items-center gap-2 sm:gap-4 flex-wrap justify-end">
-            <NavLink to="/" end className={navClass}>
-              Overview
-            </NavLink>
-            <NavLink to="/label" className={navClass}>
-              Label
-            </NavLink>
-            {isAdmin ? (
+            {tool ? (
+              <>
+                <NavLink to={`/${tool}`} end className={navClass}>
+                  Overview
+                </NavLink>
+                <NavLink to={`/${tool}/label`} className={navClass}>
+                  Label
+                </NavLink>
+              </>
+            ) : null}
+            {/* On the picker itself the header is just the brand and the user
+                menu — the tiles are the navigation. */}
+            {isAdmin && pathname !== "/" ? (
               <NavLink to="/admin" className={navClass}>
                 Admin
               </NavLink>
@@ -98,16 +143,23 @@ function Shell() {
       </header>
       <main className={mainCls}>
         <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/label" element={<Label />} />
-          <Route path="/label/:cropId" element={<Label />} />
-          {/* The Images, Classes and Upload pages folded into Overview and
-              Admin; stale bookmarks and old links land on the Overview rather
-              than a 404. */}
-          <Route path="/upload" element={<Navigate to="/" replace />} />
-          <Route path="/images" element={<Navigate to="/" replace />} />
-          <Route path="/classes" element={<Navigate to="/" replace />} />
-          <Route path="/classes/*" element={<Navigate to="/" replace />} />
+          <Route path="/" element={<Picker />} />
+          {/* Blech — the original tool — moved under /blech when the picker
+              took /. Age is its sibling. */}
+          <Route path="/blech" element={<Home />} />
+          <Route path="/blech/label" element={<Label />} />
+          <Route path="/blech/label/:cropId" element={<Label />} />
+          <Route path="/age" element={<AgeHome />} />
+          <Route path="/age/label" element={<AgeLabel />} />
+          {/* Old links stay alive: labeling moved under /blech, and the
+              Images, Classes and Upload pages folded into Blech's Overview
+              and Admin long ago — stale bookmarks land there, not on a 404. */}
+          <Route path="/label" element={<Navigate to="/blech/label" replace />} />
+          <Route path="/label/:cropId" element={<LegacyLabelRedirect />} />
+          <Route path="/upload" element={<Navigate to="/blech" replace />} />
+          <Route path="/images" element={<Navigate to="/blech" replace />} />
+          <Route path="/classes" element={<Navigate to="/blech" replace />} />
+          <Route path="/classes/*" element={<Navigate to="/blech" replace />} />
           <Route
             path="/admin"
             element={

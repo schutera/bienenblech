@@ -375,7 +375,11 @@ def test_no_zip_member_carries_a_password_hash(seeded_store, cfg, poster, tmp_pa
         names = zf.namelist()
         assert "users.csv" not in names
         csvs = [n for n in names if n.endswith(".csv")]
-        assert sorted(csvs) == ["classes.csv", "crops.csv", "images.csv", "masks.csv"]
+        # age_samples.csv joined when the Age tool landed (SPEC section 8
+        # extended): annotator judgment now lives in two tables, so the flat
+        # rescue must carry both.
+        assert sorted(csvs) == ["age_samples.csv", "classes.csv", "crops.csv",
+                                "images.csv", "masks.csv"]
         for name in csvs:
             text = zf.read(name).decode("utf-8")
             header = text.splitlines()[0].split(",")
@@ -974,3 +978,158 @@ def test_backup_status_never_reports_the_webhook_url(seeded_store, cfg, monkeypa
     assert out["webhook_valid"] is True
     assert FAKE_WEBHOOK not in json.dumps(out, default=str)
     assert FAKE_WEBHOOK.rsplit("/", 1)[-1] not in json.dumps(out, default=str)
+
+
+# ================================================ the age tool joins the backup
+# The Age tool's samples are annotator judgment too, so SPEC section 8's rules
+# extend to them unchanged: files enumerated from the DB (never a directory
+# walk), age-only activity counts as new work for the A15 watermark, and a
+# store that predates the tool still backs up. These tests reuse this module's
+# sandboxed fixtures; the HTTP-level age contract itself is pinned in
+# tests/test_age.py.
+
+def _upload_age(client: TestClient, seed: int) -> str:
+    """One age sample through the real route, returning its sample_id."""
+    r = client.post(
+        "/api/age/samples",
+        files=[("file", (f"bee{seed}.png", io.BytesIO(_png(seed)), "image/png"))],
+    )
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload["samples"], f"age upload {seed} was deduped: {payload}"
+    return payload["samples"][0]["sample_id"]
+
+
+def test_age_sample_files_and_csv_join_the_archive(
+    seeded_store, cfg, admin_client, poster
+):
+    """The zip carries `age/<sample_id>.jpg` plus `age_samples.csv`, and the
+    CSV keeps the whole judgment — including FLAGGED rows, unlike the training
+    export at /api/age/export: a flag and its reason are annotator work, and
+    the backup is the store of record, not a dataset. A backup that dropped
+    them would be the one place a flag disappears."""
+    done_id = _upload_age(admin_client, 71)
+    flagged_id = _upload_age(admin_client, 72)
+    r = admin_client.post(f"/api/age/samples/{done_id}/annotate",
+                          json={"age_days": 9})
+    assert r.status_code == 200, r.text
+    r = admin_client.post(f"/api/age/samples/{flagged_id}/flag",
+                          json={"reason": "two bees"})
+    assert r.status_code == 200, r.text
+
+    result = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
+    assert result["status"] == "ok", result
+
+    with zipfile.ZipFile(result["zip_path"]) as zf:
+        names = zf.namelist()
+        assert f"age/{done_id}.jpg" in names
+        assert f"age/{flagged_id}.jpg" in names
+        rows = zf.read("age_samples.csv").decode("utf-8").splitlines()
+
+    header = rows[0].split(",")
+    for col in ("sample_id", "status", "age_days", "annotated_by", "flag_reason"):
+        assert col in header, f"age_samples.csv lost the {col} column"
+    by_id = {r.split(",")[header.index("sample_id")]: r for r in rows[1:]}
+    assert set(by_id) == {done_id, flagged_id}
+    assert "9" in by_id[done_id].split(",")
+    assert "two bees" in by_id[flagged_id]
+
+
+def test_a_stray_file_beside_the_age_samples_never_reaches_the_archive(
+    seeded_store, cfg, admin_client, poster
+):
+    """Enumerated, never walked — the same rule as `data/images`, for the same
+    reason: this archive is posted to a chat channel, and a glob that one day
+    sweeps up an adjacent secret cannot be un-posted."""
+    sample_id = _upload_age(admin_client, 73)
+    age_dir = Path(cfg.paths.images_dir).parent / "age"
+    (age_dir / "SECRET.env").write_text("BIENENBLECH_SECRET=oops", encoding="utf-8")
+
+    result = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
+    assert result["status"] == "ok", result
+
+    names = _members(result["zip_path"])
+    assert not any("SECRET.env" in n for n in names), "stray swept into the zip"
+    # The DB-known sample IS there — the absence above is selection, not a
+    # broken age step.
+    assert f"age/{sample_id}.jpg" in names
+
+
+def test_age_only_activity_moves_the_watermark(
+    seeded_store, cfg, admin_client, poster
+):
+    """A15 extended: a deployment that spends a week doing nothing but age work
+    (an admin uploading bees, powerusers judging them) has produced exactly the
+    irreplaceable thing backups exist for, so both an age upload and an
+    age-only annotation must read as new work — a watermark that watched only
+    the Blech tables would answer 'nothing new' forever."""
+    first = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
+    assert first["status"] == "ok"
+    before = _watermark(cfg)
+    assert before
+
+    con = db.connect(cfg)
+    try:
+        assert backup.due(con, cfg.backup) == (
+            False, f"nothing new since the last backup (watermark {before})"
+        )
+    finally:
+        con.close()
+
+    # Stage 1: an age UPLOAD only — no Blech activity, no annotation.
+    sample_id = _upload_age(admin_client, 74)
+    con = db.connect(cfg)
+    try:
+        assert backup._last_change(con) > datetime.fromisoformat(before), (
+            "an age upload did not register as new work (A15)"
+        )
+    finally:
+        con.close()
+    second = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
+    assert second["status"] == "ok"
+    between = _watermark(cfg)
+    assert datetime.fromisoformat(between) > datetime.fromisoformat(before)
+
+    # Stage 2: an age ANNOTATION only — no upload anywhere. The judgment is the
+    # part that cannot be regenerated at all.
+    r = admin_client.post(f"/api/age/samples/{sample_id}/annotate",
+                          json={"age_days": 28})
+    assert r.status_code == 200, r.text
+    con = db.connect(cfg)
+    try:
+        assert backup._last_change(con) > datetime.fromisoformat(between), (
+            "an age-only annotation did not register as new work (A15)"
+        )
+    finally:
+        con.close()
+
+
+def test_backup_survives_a_store_without_the_age_table(
+    seeded_store, cfg, poster
+):
+    """A pre-age store still backs up — never a failed run that quietly stops
+    archiving the Blech work too.
+
+    The route this actually takes: `run_backup` opens the store through
+    `db.init_db` (idempotent by contract), so a pre-age store is migrated on
+    the spot and the age members degrade to an EMPTY `age_samples.csv` and no
+    `age/` files, rather than the run dying on a table that never existed.
+    Simulated by dropping the table from an otherwise-live store — exactly the
+    shape the run's own init_db then finds on disk."""
+    con = db.connect(cfg)
+    try:
+        con.execute("DROP TABLE IF EXISTS age_samples")
+    finally:
+        con.close()
+
+    result = backup.run_backup(cfg, trigger="cli", force=True, poster=poster)
+    assert result["status"] == "ok", result
+
+    names = _members(result["zip_path"])
+    assert not any(n.startswith("age/") for n in names)
+    with zipfile.ZipFile(result["zip_path"]) as zf:
+        rows = zf.read("age_samples.csv").decode("utf-8").splitlines()
+    assert len(rows) == 1, f"a store with no age work exported rows: {rows[1:]}"
+    # The Blech members are all still present.
+    assert f"images/{seeded_store['image_id']}.jpg" in names
+    assert "masks.csv" in names

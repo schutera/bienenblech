@@ -5,7 +5,9 @@ Annotator hours are the only thing on this box that cannot be regenerated. The
 images can in principle be re-uploaded, but the polygons drawn against their
 exact pixel grid cannot, so the backup carries *both*: labels without pixels are
 worthless, which is why `images/<image_id>.jpg` is in the zip and why this module
-is bulkier than cownting's ancestor.
+is bulkier than cownting's ancestor. The Age tool's photos ride along as
+`age/<sample_id>.jpg` for the same reason: an age judgment is only meaningful
+next to the exact photo it was made against.
 
 The schedule is an in-process daemon thread started from `create_app` that ticks
 every 15 minutes and asks the DB *"has the interval elapsed since the last
@@ -273,18 +275,47 @@ def _scalar(con: duckdb.DuckDBPyConnection, sql: str, params: Sequence[Any] = ()
     return row[0] if row else None
 
 
+def _has_table(con: duckdb.DuckDBPyConnection, name: str) -> bool:
+    """Does the connected catalog carry `name`? The Age-tool queries are gated
+    on this: `age_samples` postdates the first deployed stores, and a backup
+    must keep rescuing the Blech labels from a store the new `db.init_db` has
+    never touched (the CLI against a restored file, a box whose server has not
+    rebooted since the Age tool shipped). A gate rather than a blanket
+    try/except, so a real error in an age query still surfaces as the
+    genuine-failure class instead of quietly emptying the archive."""
+    return bool(
+        _scalar(
+            con,
+            "SELECT count(*) FROM duckdb_tables() "
+            "WHERE database_name = current_database() AND table_name = ?",
+            [name],
+        )
+    )
+
+
 def _last_change(con: duckdb.DuckDBPyConnection) -> datetime | None:
     """Newest timestamp of anything worth backing up, or None on an empty store.
 
-    Three sources, not one: a mask edited, a crop completed, or an image uploaded
+    Four sources, not one: a mask edited, a crop completed, or an image uploaded
     all represent work that would hurt to lose. Watching only `masks` would leave
     a box that has been uploading frames all week reading as "nothing new", and
-    the images are the expensive half of the zip."""
+    the images are the expensive half of the zip.
+
+    The fourth is the Age tool (A15): its uploads and annotations are the same
+    unrecoverable annotator hours, and a watermark blind to them would read an
+    age-only week as "nothing new" and never fire. Gated on the table existing,
+    so a store from before the Age tool answers instead of raising."""
     stamps = [
         _scalar(con, "SELECT max(greatest(created_at, coalesce(updated_at, created_at))) FROM masks"),
         _scalar(con, "SELECT max(completed_at) FROM crops"),
         _scalar(con, "SELECT max(uploaded_at) FROM images"),
     ]
+    if _has_table(con, "age_samples"):
+        stamps.append(_scalar(
+            con,
+            "SELECT max(greatest(uploaded_at, coalesce(annotated_at, uploaded_at))) "
+            "FROM age_samples",
+        ))
     live = [s for s in stamps if isinstance(s, datetime)]
     return max(live) if live else None
 
@@ -527,12 +558,32 @@ _CSV_SQL: dict[str, str] = {
         LEFT JOIN crops c ON c.crop_id = m.crop_id
         ORDER BY m.image_id, m.crop_id, m.created_at
     """,
+    # Flagged samples are INCLUDED, unlike the training export at
+    # /api/age/export: a flag and its reason are annotator judgment too, and
+    # this archive is the store of record, not a training set — dropping them
+    # here would make the backup the one place a flag disappears.
+    "age_samples.csv": """
+        SELECT sample_id, filename, sha256, width, height, stored_path, bytes,
+               status, age_days, annotated_by, annotated_at, flag_reason,
+               uploaded_by, uploaded_at
+        FROM age_samples ORDER BY uploaded_at, sample_id
+    """,
 }
+
+# The one CSV whose table postdates the first deployed stores. `_export_csvs`
+# emits it only when the table exists: a run against an un-migrated store must
+# still deliver the Blech members rather than die on a table that has never
+# held a row. Only tables listed here degrade — a typo in a core CSV's SQL must
+# keep failing loudly.
+_CSV_OPTIONAL_TABLE: dict[str, str] = {"age_samples.csv": "age_samples"}
 
 
 def _export_csvs(con: duckdb.DuckDBPyConnection, out_dir: Path) -> list[str]:
     written: list[str] = []
     for name, sql in _CSV_SQL.items():
+        table = _CSV_OPTIONAL_TABLE.get(name)
+        if table is not None and not _has_table(con, table):
+            continue
         safe = str(out_dir / name).replace("'", "''")
         con.execute(f"COPY ({sql}) TO '{safe}' (HEADER, DELIMITER ',')")
         written.append(name)
@@ -565,6 +616,31 @@ def _image_members(con: duckdb.DuckDBPyConnection) -> tuple[list[tuple[str, Path
     return members, missing
 
 
+def _age_members(con: duckdb.DuckDBPyConnection) -> tuple[list[tuple[str, Path]], list[str]]:
+    """(zip members, sample_ids whose file is missing) for the Age tool's photos.
+
+    Same rules as `_image_members`, for the same reasons: enumerated from
+    `age_samples`, never a walk of `data/age/`, and a missing file is recorded
+    and alerted rather than raised. A store from before the Age tool has no
+    table at all — that is a working store, not an error, so the answer is an
+    empty member list, never a raise that would fail every backup of an
+    un-migrated box."""
+    if not _has_table(con, "age_samples"):
+        return [], []
+    members: list[tuple[str, Path]] = []
+    missing: list[str] = []
+    rows = con.execute(
+        "SELECT sample_id, stored_path FROM age_samples ORDER BY sample_id"
+    ).fetchall()
+    for sample_id, stored_path in rows:
+        path = Path(str(stored_path))
+        if not path.is_file():
+            missing.append(str(sample_id))
+            continue
+        members.append((f"age/{sample_id}{path.suffix or '.jpg'}", path))
+    return members, missing
+
+
 # ------------------------------------------------------------------- bundle text
 
 def _manifest(
@@ -574,6 +650,7 @@ def _manifest(
     trigger: str,
     members: Sequence[str],
     missing_images: Sequence[str],
+    missing_age_images: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Bundle metadata. Every aggregate is individually guarded: a future schema
     change must degrade the manifest, not raise a KeyError that escapes the
@@ -591,6 +668,7 @@ def _manifest(
         "watermark_to": str(run["watermark_to"]) if run.get("watermark_to") else None,
         "members": list(members),
         "missing_images": list(missing_images),
+        "missing_age_images": list(missing_age_images),
         # Machine-readable statement of what the snapshot deliberately omits, so a
         # restorer never has to infer "no users table" from an absence (A11).
         "snapshot_excluded_tables": list(_SNAPSHOT_EXCLUDED_TABLES),
@@ -612,6 +690,13 @@ def _manifest(
         ("masks", "SELECT count(*) FROM masks WHERE NOT deleted"),
         ("masks_deleted", "SELECT count(*) FROM masks WHERE deleted"),
         ("classes", "SELECT count(*) FROM label_classes"),
+        # Absent, not zero, on a store from before the Age tool: the per-key
+        # guard swallows the missing table, and a reader can then tell "no Age
+        # tool yet" from "Age tool with nothing in it".
+        ("age_samples", "SELECT count(*) FROM age_samples"),
+        ("age_open", "SELECT count(*) FROM age_samples WHERE status = 'open'"),
+        ("age_done", "SELECT count(*) FROM age_samples WHERE status = 'done'"),
+        ("age_flagged", "SELECT count(*) FROM age_samples WHERE status = 'flagged'"),
         ("users_excluded", "SELECT count(*) FROM users"),
     ):
         try:
@@ -635,6 +720,32 @@ def _manifest(
 
 def _readme(man: Mapping[str, Any], *, stamp: str, trigger: str) -> str:
     counts = man.get("counts") or {}
+    members = man.get("members") or []
+    # The Age members are described only when they are actually in this zip, so
+    # the README of a store from before the Age tool never documents files the
+    # archive does not contain, and a pre-Age restore never chases a phantom
+    # `age/` directory.
+    has_age = "age_samples.csv" in members
+    age_summary = (
+        f"\nThe Age tool adds {counts.get('age_samples')} bee photos, "
+        f"{counts.get('age_done')} of them age-annotated."
+        if has_age else ""
+    )
+    age_member_lines = (
+        "    age_samples.csv      one row per Age sample: status, age_days (28\n"
+        "                         meaning 28+), flag reason; flagged rows included\n"
+        "    age/<id>.jpg         every stored bee photo for the Age tool\n"
+        if has_age else ""
+    )
+    age_pixels = (
+        " The same goes for the Age photos: an age judgment is only meaningful "
+        "next to the exact photo it was made against."
+        if has_age else ""
+    )
+    age_restore = " Unpack `age/` into `data/age/` the same way." if has_age else ""
+    age_users = (
+        " `age_samples.uploaded_by`, `age_samples.annotated_by`," if has_age else ""
+    )
     return f"""bienenblech backup
 ==================
 
@@ -642,7 +753,7 @@ Created {stamp} (UTC) by run {man.get('run_id')} (trigger: {trigger}) on
 {man.get('host')}, bienenblech {man.get('app_version')}.
 
 {counts.get('masks')} masks over {counts.get('crops_done')} completed crops,
-{counts.get('images')} images, {counts.get('classes')} classes.
+{counts.get('images')} images, {counts.get('classes')} classes.{age_summary}
 
 Members
 -------
@@ -654,12 +765,12 @@ Members
     masks.csv            one row per polygon, points as JSON in SOURCE-IMAGE px,
                          with the crop rect alongside; soft-deleted rows included
     images/<id>.jpg      every stored derivative
-    manifest.json        counts, versions, host, watermark
+{age_member_lines}    manifest.json        counts, versions, host, watermark
     README.txt           this file
 
 The images are in here because labels without pixels are worthless: every polygon
 is stored in the coordinate space of its derivative, so a restored DB next to
-different pixels is not a dataset.
+different pixels is not a dataset.{age_pixels}
 
 Restore
 -------
@@ -675,7 +786,7 @@ Restore
    there were {counts.get('users_excluded')} account(s) on this box in total when
    the archive was written, and their passwords are not in here and cannot be
    recovered from it.
-3. Unpack `images/` into `data/images/` (the DB's stored_path points there).
+3. Unpack `images/` into `data/images/` (the DB's stored_path points there).{age_restore}
 4. docker compose up -d  — the entrypoint re-owns drifted files on boot.
 
 `data/cache/` is not in this archive on purpose: crop JPEGs are regenerated on
@@ -693,9 +804,9 @@ as sensitive as the box itself.
 
 Usernames DO appear, and that is intended: `images.uploaded_by`,
 `crops.completed_by`, `masks.created_by`, `label_classes.created_by`,
-`class_audit.actor`, and the same columns in the CSVs. A dataset that cannot say
-who labeled what is a worse dataset. Usernames are not secrets; password hashes
-are.
+`class_audit.actor`,{age_users} and the same columns in the CSVs. A dataset
+that cannot say who labeled what is a worse dataset. Usernames are not secrets;
+password hashes are.
 """
 
 
@@ -928,21 +1039,29 @@ def run_backup(
             snapshot_db(config.paths.db_path, sdir / "bienenblech.duckdb")
             csv_names = _export_csvs(con, sdir)
             image_members, missing = _image_members(con)
+            age_members, age_missing = _age_members(con)
             if missing:
                 print(
                     f"{_ALERT} {len(missing)} image file(s) referenced by the DB are "
                     f"missing from disk and are not in this archive: {missing[:5]}"
                 )
+            if age_missing:
+                print(
+                    f"{_ALERT} {len(age_missing)} age sample file(s) referenced by the "
+                    f"DB are missing from disk and are not in this archive: {age_missing[:5]}"
+                )
             members: list[tuple[str, Path]] = [
                 ("bienenblech.duckdb", sdir / "bienenblech.duckdb"),
                 *((name, sdir / name) for name in csv_names),
                 *image_members,
+                *age_members,
                 ("manifest.json", sdir / "manifest.json"),
                 ("README.txt", sdir / "README.txt"),
             ]
             man = _manifest(
                 con, run=run, trigger=trigger,
                 members=[m[0] for m in members], missing_images=missing,
+                missing_age_images=age_missing,
             )
             (sdir / "manifest.json").write_text(
                 json.dumps(man, indent=2, default=str), encoding="utf-8"

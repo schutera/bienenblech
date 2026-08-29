@@ -317,7 +317,7 @@ export default function Label() {
       loadedFor.current = null;
       if (cropId) {
         skipNextLoad.current = true;
-        navigate("/label", { replace: true });
+        navigate("/blech/label", { replace: true });
       }
       return;
     }
@@ -325,7 +325,7 @@ export default function Label() {
     // effect and it no-ops instead of re-fetching the crop we are already showing.
     adopt(next);
     if (next.crop.crop_id !== cropId) {
-      navigate(`/label/${next.crop.crop_id}`, { replace: true });
+      navigate(`/blech/label/${next.crop.crop_id}`, { replace: true });
     }
   }
 
@@ -379,7 +379,7 @@ export default function Label() {
         <EmptyState
           title="No open crops left"
           body="Every crop is marked done or empty. Upload the next frame on the Overview, or reopen a crop from its frame grid there."
-          action={<Button onClick={() => navigate("/")}>Go to Overview</Button>}
+          action={<Button onClick={() => navigate("/blech")}>Go to Overview</Button>}
         />
       </div>
     );

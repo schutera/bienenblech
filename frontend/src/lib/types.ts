@@ -60,3 +60,51 @@ export type CropTask = {
    */
   n_done: number;
 };
+
+// ------------------------------------------------------------------------ age
+
+/**
+ * The AGE tool's sample row (`age_samples`) — the second labeling tool behind
+ * the same login. Each sample is a photo of ONE instance-masked honeybee; the
+ * annotation is a single age judgment. Single-annotator, like Blech crops:
+ * one sample, one answer, done.
+ *
+ * `age_days` is a whole number of days, 0..28, and 28 is RIGHT-CENSORED —
+ * displayed as "28+", meaning four weeks or older. Why the scale stops there:
+ * summer workers average 15-38 days and winter bees live for months, but an
+ * appearance-based judgment is only meaningful across the temporal-polyethism
+ * window (cleaning 0-3 d, nursing 4-12 d, maintenance 12-20 d, foraging
+ * 21 d+). Past four weeks, appearance stops separating ages, so a bigger
+ * number would be false precision.
+ */
+export type AgeSampleStatus = "open" | "done" | "flagged";
+
+export type AgeSample = {
+  sample_id: string;
+  filename: string;
+  width: number;
+  height: number;
+  bytes: number;
+  uploaded_by: string | null;
+  uploaded_at: string;
+  status: AgeSampleStatus;
+  /** Set only while status is "done". */
+  age_days: number | null;
+  annotated_by: string | null;
+  annotated_at: string | null;
+  /** Set only while status is "flagged", and only when a reason was given. */
+  flag_reason: string | null;
+};
+
+/**
+ * `GET /api/age/stats`. The histogram counts ANNOTATED samples per week bucket
+ * 0..4 — bucket 4 is the right-censored 28+. It may arrive as an array indexed
+ * by bucket or as an object keyed by bucket number; pages normalize both.
+ */
+export type AgeStats = {
+  total: number;
+  open: number;
+  done: number;
+  flagged: number;
+  histogram: number[] | Record<string, number>;
+};

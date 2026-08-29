@@ -87,9 +87,27 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
     )
     config = Config(paths=paths, backup=BackupCfg(enabled=False))
 
-    # The guard. Cheap, and it fires before a single byte is written.
-    for name in ("db_path", "images_dir", "cache_dir", "backups_dir"):
-        value = Path(getattr(config.paths, name)).resolve()
+    # PathsCfg may grow fields this fixture does not know by name yet (the Age
+    # tool's sample directory is the live case). A new field's default is a
+    # RELATIVE path under the real `data/`, so leaving it at its default would
+    # aim the very first age upload of the suite at the production store.
+    # Repoint every unrecognised string field under `root` before anything can
+    # read it, keeping only the default's basename.
+    for name in type(config.paths).model_fields:
+        if name in ("db_path", "images_dir", "cache_dir", "backups_dir"):
+            continue
+        default = getattr(config.paths, name)
+        if isinstance(default, str):
+            setattr(config.paths, name, str(root / (Path(default).name or name)))
+
+    # The guard. Cheap, and it fires before a single byte is written. Every
+    # string field of PathsCfg is checked, not just the four named ones, so the
+    # repointing loop above cannot silently miss a new path.
+    for name in type(config.paths).model_fields:
+        raw = getattr(config.paths, name)
+        if not isinstance(raw, str):
+            continue
+        value = Path(raw).resolve()
         assert tmp_path.resolve() in value.parents, (
             f"config.paths.{name} = {value} escapes tmp_path; tests must never "
             f"touch the real store under data/"

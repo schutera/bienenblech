@@ -28,6 +28,11 @@ Four things worth knowing before editing:
 *   **`/api/crops/next` is declared before `/api/crops/{crop_id}`.** Starlette
     matches in declaration order, so the literal must come first or "next" is
     read as a crop id and every queue request 404s.
+
+The Age tool's routes (/api/age/*) live in `age.py` and are included as a
+router by `create_app`; they inherit the app-level login gate and the exception
+handlers above. Only `/api/picker/examples` stays here, because it is the one
+endpoint that reads both tools' tables.
 """
 from __future__ import annotations
 
@@ -409,8 +414,14 @@ def create_app(config: Config | None = None) -> FastAPI:
         # committed example, so a fresh clone serves with no setup step.
         config = load_config()
 
+    # Imported inside the factory, not at module top: age.py imports this
+    # module's auth deps (current_user / require_admin), so a top-level import
+    # in BOTH directions would be a genuine cycle. This direction runs only
+    # after api.py is fully loaded.
+    from . import age
+
     for directory in (config.paths.images_dir, config.paths.cache_dir,
-                      config.paths.backups_dir):
+                      config.paths.backups_dir, age.age_dir(config)):
         Path(directory).mkdir(parents=True, exist_ok=True)
 
     # Boot block. Idempotent by construction (CREATE IF NOT EXISTS, additive
@@ -935,6 +946,24 @@ def create_app(config: Config | None = None) -> FastAPI:
         from . import backup
 
         return backup.run_backup(config, trigger="manual", force=bool(body and body.force))
+
+    # ---------------------------------------------------------------- age tool
+    # The whole /api/age surface lives in age.py (imported at the top of this
+    # factory); it shares this app's require_login gate, exception handlers and
+    # store. Included before the SPA catch-all below for the same declaration-
+    # order reason as every /api route.
+    app.include_router(age.create_router(config))
+
+    # ------------------------------------------------------------------ picker
+    @app.get("/api/picker/examples")
+    def picker_examples(con: Any = Depends(get_con)):
+        """One representative id per tool, so the tool picker's tiles can show
+        real data: `{"blech": crop_id | null, "age": sample_id | null}`. Lives
+        here, not in either tool's module, because it is the one endpoint that
+        reads both tools' tables — the picker sits above both tools exactly the
+        way this file sits above their routers. Null when a tool is empty; the
+        picker renders its quiet fallback tile for that."""
+        return db.picker_examples(con)
 
     # -------------------------------------------------------- static SPA (last)
     # Mounted last so every /api route above wins the match. Resolved from the

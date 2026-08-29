@@ -19,6 +19,9 @@
  */
 
 import type {
+  AgeSample,
+  AgeSampleStatus,
+  AgeStats,
   CropSummary,
   CropTask,
   ImageSummary,
@@ -161,36 +164,27 @@ export type UploadResult = {
 };
 
 /**
- * Multipart POST of one or more files under the repeatable field `file`.
+ * The multipart POST both uploaders (Blech frames, Age samples) ride on.
  *
  * XHR rather than fetch purely for `upload.onprogress`: fetch still cannot
  * report request-body progress in any browser we target, and a 200 MB frame
  * (config `upload.max_mb`) uploading with no feedback is indistinguishable from
- * a hang. `onProgress` receives 0..1 for THIS call, so the uploader on the
- * Overview sends one file per call to get honest per-file bars.
+ * a hang. `onProgress` receives 0..1 for THIS call, so the uploaders send one
+ * file per call to get honest per-file bars.
  *
  * Cookies ride along by default on a same-origin XHR, which is what
  * `credentials: "same-origin"` means for the fetch paths above — so
  * `withCredentials` is deliberately left off.
- *
- * `isEmpty` sends the optional form field `is_empty=true`: the uploader asserts
- * every sheet in THIS call is clean, so its crops are born done (no polygons,
- * attributed to the uploader), never enter the queue, and export as negatives.
- * The flag applies to the whole request — one more reason for one file per
- * call. On a sha256 duplicate the flag is ignored; nothing is changed.
  */
-export function uploadImages(
-  files: File[],
-  onProgress?: (fraction: number) => void,
-  isEmpty = false,
-): Promise<UploadResult> {
-  return new Promise<UploadResult>((resolve, reject) => {
-    const form = new FormData();
-    for (const f of files) form.append("file", f, f.name);
-    if (isEmpty) form.append("is_empty", "true");
-
+function xhrUpload<T>(
+  path: string,
+  form: FormData,
+  onProgress: ((fraction: number) => void) | undefined,
+  fallback: T,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", `${BASE}/images`);
+    xhr.open("POST", BASE + path);
 
     xhr.upload.onprogress = (e: ProgressEvent) => {
       if (onProgress && e.lengthComputable && e.total > 0) {
@@ -212,7 +206,7 @@ export function uploadImages(
       }
       if (xhr.status >= 200 && xhr.status < 300) {
         onProgress?.(1);
-        resolve((parsed ?? { images: [], duplicates: [] }) as UploadResult);
+        resolve((parsed ?? fallback) as T);
         return;
       }
       let detail = `${xhr.status} ${xhr.statusText || "upload failed"}`;
@@ -229,6 +223,26 @@ export function uploadImages(
 
     xhr.send(form);
   });
+}
+
+/**
+ * Frame upload, one or more files under the repeatable field `file`.
+ *
+ * `isEmpty` sends the optional form field `is_empty=true`: the uploader asserts
+ * every sheet in THIS call is clean, so its crops are born done (no polygons,
+ * attributed to the uploader), never enter the queue, and export as negatives.
+ * The flag applies to the whole request — one more reason for one file per
+ * call. On a sha256 duplicate the flag is ignored; nothing is changed.
+ */
+export function uploadImages(
+  files: File[],
+  onProgress?: (fraction: number) => void,
+  isEmpty = false,
+): Promise<UploadResult> {
+  const form = new FormData();
+  for (const f of files) form.append("file", f, f.name);
+  if (isEmpty) form.append("is_empty", "true");
+  return xhrUpload("/images", form, onProgress, { images: [], duplicates: [] });
 }
 
 export function listImages(): Promise<ImageSummary[]> {
@@ -413,4 +427,94 @@ export function cropImageUrl(cropId: string): string {
 
 export function imageFileUrl(imageId: string): string {
   return `${BASE}/images/${q(imageId)}/file`;
+}
+
+// ----------------------------------------------------------------------- age
+// The Age tool's client, under /api/age. Same discipline as everything above.
+// The admin-only surface (upload, delete, export) is server-enforced; the UI
+// gates on `isAdmin` too, but that is a courtesy, not the lock.
+
+/** Mirrors UploadResult: `duplicates` carries what is already on the server for
+ *  a photo whose bytes hashed to something stored — information, not an error. */
+export type UploadAgeResult = {
+  samples: AgeSample[];
+  duplicates: AgeSample[];
+};
+
+/**
+ * Multipart POST under the repeatable field `file`. ADMIN-ONLY on the server —
+ * the sample set is curated (one instance-masked bee per photo), not an open
+ * drop box like Blech frames. One file per call from the UI, for the same
+ * honest per-file bars as the frame uploader.
+ */
+export function uploadAgeSamples(
+  files: File[],
+  onProgress?: (fraction: number) => void,
+): Promise<UploadAgeResult> {
+  const form = new FormData();
+  for (const f of files) form.append("file", f, f.name);
+  return xhrUpload("/age/samples", form, onProgress, { samples: [], duplicates: [] });
+}
+
+/** Newest first; `status` narrows to one of open/done/flagged. */
+export function listAgeSamples(status?: AgeSampleStatus): Promise<AgeSample[]> {
+  return get<AgeSample[]>(`/age/samples${status ? `?status=${q(status)}` : ""}`);
+}
+
+/** The work queue: the oldest still-open sample. `null` is the 204 — queue dry. */
+export async function nextAgeSample(): Promise<AgeSample | null> {
+  const res = await raw("/age/samples/next");
+  if (res.status === 204) return null;
+  return (await res.json()) as AgeSample;
+}
+
+/** Whole days 0..28; 28 is right-censored ("28+"). The server refuses the rest,
+ *  and refuses a sample that is not open — reopen first. */
+export function annotateAge(sampleId: string, ageDays: number): Promise<AgeSample> {
+  return send<AgeSample>(`/age/samples/${q(sampleId)}/annotate`, "POST", { age_days: ageDays });
+}
+
+/** Annotation impossible — blur, several bees, not a bee. The sample leaves the
+ *  queue as `flagged` instead of sitting open forever or getting a guessed age. */
+export function flagAgeSample(sampleId: string, reason?: string): Promise<AgeSample> {
+  const r = reason?.trim();
+  return send<AgeSample>(`/age/samples/${q(sampleId)}/flag`, "POST", r ? { reason: r } : {});
+}
+
+/** Back to open; the server clears age, flag and attribution. */
+export function reopenAgeSample(sampleId: string): Promise<AgeSample> {
+  return send<AgeSample>(`/age/samples/${q(sampleId)}/reopen`, "POST");
+}
+
+/** Hard delete, stored file included. ADMIN-ONLY on the server. */
+export function deleteAgeSample(sampleId: string): Promise<void> {
+  return sendVoid(`/age/samples/${q(sampleId)}`, "DELETE");
+}
+
+export function ageStats(): Promise<AgeStats> {
+  return get<AgeStats>("/age/stats");
+}
+
+/**
+ * One representative id per tool, so the picker tiles can show real data
+ * instead of stock art. Either side is null while its tool is empty — the
+ * picker falls back to a quiet named tile.
+ */
+export type PickerExamples = { blech: string | null; age: string | null };
+
+export function pickerExamples(): Promise<PickerExamples> {
+  return get<PickerExamples>("/picker/examples");
+}
+
+// URL builders like the crop/image ones above: consumed by <img src> and a
+// download link, which carry the session cookie themselves.
+
+export function ageSampleFileUrl(sampleId: string): string {
+  return `${BASE}/age/samples/${q(sampleId)}/file`;
+}
+
+/** The export zip: images/<sample_id>.jpg + labels.csv, flagged excluded.
+ *  ADMIN-ONLY; the server answers 400 while nothing is annotated. */
+export function ageExportUrl(): string {
+  return `${BASE}/age/export`;
 }

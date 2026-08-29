@@ -15,8 +15,10 @@ first time anyone re-tiles.
 **Soft delete.** Annotator hours are the only thing on this box that cannot be
 regenerated. Masks are flagged `deleted`, classes are flagged `archived`, and
 `label_classes.yolo_index` is never reused or renumbered so a model trained on an
-older export keeps matching indices. The single hard delete in the whole schema
-is `delete_image`, which is admin-only and explicit.
+older export keeps matching indices. The hard deletes in the whole schema are
+`delete_image` and `delete_age_sample`, both admin-only and explicit — an age
+sample carries at most one answer, so deleting one is removing bad input data,
+not erasing hours of polygon work.
 
 **Row helpers return JSON-ready dicts** whose keys are exactly the TypeScript
 types in SPEC section 6, so `api.py` can return them straight out of a route:
@@ -76,6 +78,17 @@ _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 CROP_STATUSES: tuple[str, ...] = ("open", "done")
+
+AGE_STATUSES: tuple[str, ...] = ("open", "done", "flagged")
+
+# The Age tool's scale is integer DAYS 0..28, and 28 is RIGHT-CENSORED: it
+# displays as "28+" and means "four weeks or older". The cap is biology, not
+# arbitrary: summer workers average 15-38 days and winter bees live months, but
+# APPEARANCE-based age judgment is only meaningful across the temporal-
+# polyethism window (cleaning 0-3d, nursing 4-12d, hive maintenance 12-20d,
+# foraging 21d+) - past ~4 weeks a bee just looks "old forager", so the honest
+# label is the censored bucket, never a guessed day count.
+AGE_MAX_DAYS: int = 28
 
 
 class NotFound(Exception):
@@ -247,6 +260,34 @@ def init_db(con: duckdb.DuckDBPyConnection) -> None:
     )
     con.execute(
         """
+        CREATE TABLE IF NOT EXISTS age_samples (
+            sample_id    TEXT PRIMARY KEY,
+            filename     TEXT NOT NULL,        -- sanitised original upload name
+            sha256       TEXT NOT NULL UNIQUE, -- of the ORIGINAL bytes; re-upload dedupe key
+            stored_path  TEXT NOT NULL,        -- data/age/<sample_id>.jpg
+            width        INTEGER NOT NULL,     -- of the STORED derivative, not the upload
+            height       INTEGER NOT NULL,
+            "bytes"      BIGINT NOT NULL,      -- BIGINT for the same reason as images (A2)
+            uploaded_by  TEXT,
+            uploaded_at  TIMESTAMP NOT NULL,
+            status       TEXT NOT NULL DEFAULT 'open',  -- 'open' | 'done' | 'flagged'
+            -- Age in integer DAYS, 0..28, where 28 is RIGHT-CENSORED: it renders
+            -- as "28+" and means "four weeks or older". The cap is biology, not
+            -- laziness: summer workers average 15-38 days and winter bees live
+            -- months, but APPEARANCE-based age judgment is only meaningful
+            -- across the temporal-polyethism window (cleaning 0-3d, nursing
+            -- 4-12d, hive maintenance 12-20d, foraging 21d+) - past ~4 weeks a
+            -- bee just looks "old forager", so the honest label is the censored
+            -- bucket, never a guessed day count.
+            age_days     INTEGER CHECK (age_days BETWEEN 0 AND 28),
+            annotated_by TEXT,                 -- single-annotator model, like crops:
+            annotated_at TIMESTAMP,            -- one sample, one answer, done
+            flag_reason  TEXT                  -- why annotation was impossible
+        );
+        """
+    )
+    con.execute(
+        """
         CREATE TABLE IF NOT EXISTS class_audit (
             audit_id TEXT PRIMARY KEY,
             class_id TEXT,
@@ -321,6 +362,11 @@ def init_db(con: duckdb.DuckDBPyConnection) -> None:
         con.execute("DROP INDEX IF EXISTS idx_images_sha")
         con.execute('ALTER TABLE images ALTER COLUMN "bytes" SET DATA TYPE BIGINT')
 
+    # Age tool: the whole `age_samples` table is the migration. A NEW table
+    # arrives via its `CREATE TABLE IF NOT EXISTS` above — idempotent against
+    # all three store ages — so nothing extra belongs here; this note exists so
+    # the next migration author does not go looking for a missing ALTER.
+
     # --- indexes -------------------------------------------------------------
     # These three mask indexes are what keep the labeling screen honest: every
     # crop load counts masks by crop_id, the image list counts by image_id, and
@@ -331,6 +377,9 @@ def init_db(con: duckdb.DuckDBPyConnection) -> None:
     con.execute("CREATE INDEX IF NOT EXISTS idx_crops_image ON crops(image_id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_crops_status ON crops(status)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_images_sha ON images(sha256)")
+    # The Age queue and the AgeHome status pills both filter by status; the
+    # sha256 dedupe lookup rides the UNIQUE constraint's own index.
+    con.execute("CREATE INDEX IF NOT EXISTS idx_age_status ON age_samples(status)")
 
     set_meta(con, "schema_version", str(SCHEMA_VERSION))
 
@@ -968,6 +1017,230 @@ def soft_delete_mask(con: duckdb.DuckDBPyConnection, mask_id: str) -> None:
     con.execute(
         "UPDATE masks SET deleted = TRUE, updated_at = now() WHERE mask_id = ?", [mask_id]
     )
+
+
+# ------------------------------------------------------------------ age samples
+# The Age tool's rows. Same shape discipline as images: the dict carries the
+# server-side extras (`sha256`, `stored_path`, `bytes`) the API needs to dedupe,
+# serve and delete files — age.py strips them before anything reaches a browser
+# (A3). Single-annotator model like crops: one sample, one answer, done. The
+# status guard for annotate (only an 'open' sample takes an answer) is the
+# API's, same split as the crop completeness invariant (A1): these helpers
+# store what they are told.
+_AGE_COLS = """
+    a.sample_id, a.filename, a.sha256, a.stored_path, a.width, a.height,
+    a."bytes", a.uploaded_by, a.uploaded_at, a.status, a.age_days,
+    a.annotated_by, a.annotated_at, a.flag_reason
+"""
+
+_AGE_FIELDS: tuple[str, ...] = (
+    "sample_id", "filename", "sha256", "stored_path", "width", "height", "bytes",
+    "uploaded_by", "uploaded_at",
+)
+
+
+def insert_age_sample(con: duckdb.DuckDBPyConnection, **fields: Any) -> dict[str, Any]:
+    """Record one uploaded age sample, born 'open'. Returns its row dict.
+
+    `sample_id` defaults to a fresh uuid4 hex and `uploaded_at` to `now()`; the
+    annotation columns are not accepted here on purpose — a sample cannot be
+    born answered, because an unexamined default is exactly the silent bias the
+    Age tool's touched-slider rule exists to prevent."""
+    unknown = sorted(set(fields) - set(_AGE_FIELDS))
+    if unknown:
+        raise ValueError(f"unknown age sample field(s): {', '.join(unknown)}")
+    sample_id = fields.get("sample_id") or _uid()
+    missing = [
+        k for k in ("filename", "sha256", "stored_path", "width", "height", "bytes")
+        if fields.get(k) is None
+    ]
+    if missing:
+        raise ValueError(f"missing age sample field(s): {', '.join(missing)}")
+    con.execute(
+        'INSERT INTO age_samples (sample_id, filename, sha256, stored_path, width, '
+        'height, "bytes", uploaded_by, uploaded_at, status) '
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, coalesce(CAST(? AS TIMESTAMP), now()), 'open')",
+        [
+            sample_id, fields["filename"], fields["sha256"], fields["stored_path"],
+            int(fields["width"]), int(fields["height"]), int(fields["bytes"]),
+            fields.get("uploaded_by"), fields.get("uploaded_at"),
+        ],
+    )
+    row = get_age_sample(con, sample_id)
+    assert row is not None
+    return row
+
+
+def list_age_samples(
+    con: duckdb.DuckDBPyConnection, *, status: str | None = None
+) -> list[dict[str, Any]]:
+    """Every sample, newest upload first — the order the AgeHome list renders.
+    `status` filters to one of AGE_STATUSES; an unknown value is refused rather
+    than silently returning everything."""
+    where, params = "", []
+    if status is not None:
+        if status not in AGE_STATUSES:
+            raise ValueError(f"status must be one of {AGE_STATUSES}, got {status!r}")
+        where = "WHERE a.status = ? "
+        params = [status]
+    return _rows(con.execute(
+        f"SELECT {_AGE_COLS} FROM age_samples a {where}"
+        "ORDER BY a.uploaded_at DESC, a.sample_id",
+        params,
+    ))
+
+
+def get_age_sample(con: duckdb.DuckDBPyConnection, sample_id: str) -> dict[str, Any] | None:
+    return _one(con.execute(
+        f"SELECT {_AGE_COLS} FROM age_samples a WHERE a.sample_id = ?", [sample_id]
+    ))
+
+
+def find_age_sample_by_sha(
+    con: duckdb.DuckDBPyConnection, sha256: str
+) -> dict[str, Any] | None:
+    """The already-stored sample with these original bytes, if any. Re-upload
+    dedupe, answered as information, not error: the same bee photo dragged in
+    twice must not enter the queue twice and split one answer across two ids."""
+    return _one(con.execute(
+        f"SELECT {_AGE_COLS} FROM age_samples a WHERE a.sha256 = ? "
+        "ORDER BY a.uploaded_at LIMIT 1",
+        [sha256],
+    ))
+
+
+def next_open_age_sample(con: duckdb.DuckDBPyConnection) -> dict[str, Any] | None:
+    """The next sample to judge: the oldest still-open one. None when the queue
+    is dry, which the API answers as 204 — same queue discipline as crops."""
+    return _one(con.execute(
+        f"SELECT {_AGE_COLS} FROM age_samples a WHERE a.status = 'open' "
+        "ORDER BY a.uploaded_at, a.sample_id LIMIT 1"
+    ))
+
+
+def annotate_age_sample(
+    con: duckdb.DuckDBPyConnection, sample_id: str, *, age_days: int, actor: str | None
+) -> dict[str, Any]:
+    """Store one answer: status 'done', the age, and who/when. Clears any stale
+    flag_reason so the row never says both "done" and "impossible". Range is
+    validated here as a backstop to the CHECK constraint; the open-status guard
+    lives in the API, where it can answer 409."""
+    days = int(age_days)
+    if not 0 <= days <= AGE_MAX_DAYS:
+        raise ValueError(
+            f"age_days must be between 0 and {AGE_MAX_DAYS} (28 meaning '28+'), "
+            f"got {age_days!r}"
+        )
+    if get_age_sample(con, sample_id) is None:
+        raise NotFound(f"unknown age sample {sample_id!r}")
+    con.execute(
+        "UPDATE age_samples SET status = 'done', age_days = ?, annotated_by = ?, "
+        "annotated_at = now(), flag_reason = NULL WHERE sample_id = ?",
+        [days, actor, sample_id],
+    )
+    row = get_age_sample(con, sample_id)
+    assert row is not None
+    return row
+
+
+def flag_age_sample(
+    con: duckdb.DuckDBPyConnection, sample_id: str, *, reason: str | None
+) -> dict[str, Any]:
+    """Mark a sample unanswerable (blur, multiple bees, not a bee): it leaves
+    the queue as 'flagged'. Any stored answer is cleared too — the export
+    filters by status anyway, but a row carrying both an age and a flag would
+    lie to whoever reads the backup CSV."""
+    if get_age_sample(con, sample_id) is None:
+        raise NotFound(f"unknown age sample {sample_id!r}")
+    con.execute(
+        "UPDATE age_samples SET status = 'flagged', flag_reason = ?, age_days = NULL, "
+        "annotated_by = NULL, annotated_at = NULL WHERE sample_id = ?",
+        [reason, sample_id],
+    )
+    row = get_age_sample(con, sample_id)
+    assert row is not None
+    return row
+
+
+def reopen_age_sample(con: duckdb.DuckDBPyConnection, sample_id: str) -> dict[str, Any]:
+    """Back into the queue: clears age, flag and attribution, so the provenance
+    columns always describe the answer that currently stands rather than one
+    that was undone — same rule as reopening a crop."""
+    if get_age_sample(con, sample_id) is None:
+        raise NotFound(f"unknown age sample {sample_id!r}")
+    con.execute(
+        "UPDATE age_samples SET status = 'open', age_days = NULL, annotated_by = NULL, "
+        "annotated_at = NULL, flag_reason = NULL WHERE sample_id = ?",
+        [sample_id],
+    )
+    row = get_age_sample(con, sample_id)
+    assert row is not None
+    return row
+
+
+def delete_age_sample(con: duckdb.DuckDBPyConnection, sample_id: str) -> dict[str, Any]:
+    """Hard-delete one sample; returns the row as it was so the caller can
+    unlink `stored_path`. Admin-only at the API. Unlike masks there is no soft
+    delete here: a sample is one photo carrying at most one answer, so deleting
+    it is an admin removing bad input data, not destroying labeling hours at
+    scale — and a flag already covers "keep it but out of the queue"."""
+    row = get_age_sample(con, sample_id)
+    if row is None:
+        raise NotFound(f"unknown age sample {sample_id!r}")
+    con.execute("DELETE FROM age_samples WHERE sample_id = ?", [sample_id])
+    return row
+
+
+def age_stats(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+    """Counts plus the week-bucket histogram for GET /api/age/stats.
+
+    `histogram` is a zero-filled array indexed by bucket, matching the binding
+    AgeStats TS type. Buckets are `age_days // 7` -> weeks 0..4; 28 lands alone
+    in bucket 4, which is exactly the right-censored "28+" bar (AGE_MAX_DAYS).
+    Only annotated ('done') samples are counted — flagged and open samples have
+    no age to bucket."""
+    total, n_open, n_done, n_flagged = con.execute(
+        """
+        SELECT count(*),
+               count(*) FILTER (WHERE status = 'open'),
+               count(*) FILTER (WHERE status = 'done'),
+               count(*) FILTER (WHERE status = 'flagged')
+        FROM age_samples
+        """
+    ).fetchone()
+    counted = dict(con.execute(
+        "SELECT age_days // 7, count(*) FROM age_samples "
+        "WHERE status = 'done' AND age_days IS NOT NULL GROUP BY 1"
+    ).fetchall())
+    histogram = [int(counted.get(w, 0)) for w in range(AGE_MAX_DAYS // 7 + 1)]
+    return {
+        "total": int(total),
+        "open": int(n_open),
+        "done": int(n_done),
+        "flagged": int(n_flagged),
+        "histogram": histogram,
+    }
+
+
+def picker_examples(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+    """One representative id per tool for the picker tiles:
+    `{"blech": crop_id | None, "age": sample_id | None}`.
+
+    Blech prefers the most recently completed crop — a done crop is guaranteed
+    to show real reviewed content — and falls back to any crop; Age takes the
+    newest sample. Null-safe when a tool is empty, so the picker can render its
+    quiet fallback tile instead of erroring. Lives here rather than in either
+    tool's module because it is the one query that reads both tools' tables."""
+    blech = con.execute(
+        "SELECT crop_id FROM crops WHERE status = 'done' "
+        "ORDER BY completed_at DESC, crop_id LIMIT 1"
+    ).fetchone() or con.execute(
+        "SELECT crop_id FROM crops ORDER BY crop_id LIMIT 1"
+    ).fetchone()
+    age = con.execute(
+        "SELECT sample_id FROM age_samples ORDER BY uploaded_at DESC, sample_id LIMIT 1"
+    ).fetchone()
+    return {"blech": blech[0] if blech else None, "age": age[0] if age else None}
 
 
 # ------------------------------------------------------------------------- stats

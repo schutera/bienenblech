@@ -14,8 +14,11 @@
  */
 
 import { useEffect, useState, type FormEvent } from "react";
-import type { LabelClass, Role } from "../lib/types";
+import { Link } from "react-router-dom";
+import type { AgeStats, LabelClass, Role } from "../lib/types";
 import {
+  ageExportUrl,
+  ageStats,
   archiveClass,
   backupStatus,
   createUser,
@@ -85,6 +88,7 @@ export default function Admin() {
       <Classes />
       <Backup />
       <Export />
+      <AgeExport />
     </div>
   );
 }
@@ -774,6 +778,68 @@ function Export() {
             </span>
           ) : null}
         </div>
+      </Card>
+    </section>
+  );
+}
+
+// ----------------------------------------------------------------- age export
+
+/**
+ * The Age tool's admin surface, kept deliberately thin: upload, reopen and
+ * delete live on the Age overview next to the samples they act on. What
+ * belongs here is what mirrors this page's other custody concerns — the
+ * dataset download, and the count of flagged samples sitting outside it.
+ */
+function AgeExport() {
+  const [s, setS] = useState<AgeStats | null>(null);
+
+  // Same reasoning as the YOLO export above: the download is a plain browser
+  // navigation, so the one predictable refusal — nothing annotated yet — is
+  // checked here rather than surfacing as a raw JSON page.
+  useEffect(() => {
+    ageStats()
+      .then(setS)
+      .catch(() => setS(null));
+  }, []);
+
+  const done = s?.done ?? null;
+  const ok = done === null || done > 0;
+
+  return (
+    <section className="flex flex-col gap-4">
+      <SectionLabel>Age export</SectionLabel>
+      <Card className="p-5">
+        <p className="text-[13px] text-gray-mid">
+          A zip of every annotated bee photo plus labels.csv — sample id,
+          filename, age in days (28 means 28+), annotator, time. Flagged
+          samples are excluded: a flag says the photo cannot be judged, so it
+          has no label to ship.
+        </p>
+        <div className="mt-4 flex items-center gap-4 flex-wrap">
+          <Button href={ok ? ageExportUrl() : undefined} download disabled={!ok}>
+            Download the age dataset
+          </Button>
+          {done !== null ? (
+            <span className="text-[13px] text-gray-tertiary">
+              {done > 0
+                ? `${done.toLocaleString()} annotated sample${done === 1 ? "" : "s"} will be included.`
+                : "Nothing annotated yet — nothing to export."}
+            </span>
+          ) : null}
+        </div>
+        {s && s.flagged > 0 ? (
+          <p className="text-[12px] text-gray-mid mt-3 flex items-center gap-2 flex-wrap">
+            <Pill tone="warn">{s.flagged} flagged</Pill>
+            <span>
+              outside the export — review them on the{" "}
+              <Link to="/age" className="text-accent hover:text-accent-deep transition-colors">
+                Age overview
+              </Link>
+              .
+            </span>
+          </p>
+        ) : null}
       </Card>
     </section>
   );
