@@ -52,3 +52,7 @@ backup:
   max_upload_mb: 8            # Discord's unboosted per-file cap; a larger zip is
                               # still written and rotated locally, and only a text
                               # summary naming the path is posted.
+
+tools:
+  age: false   # Age tool hidden on production for now; flip to true to launch it.
+                # Its store and backup schedule are unaffected by this switch.

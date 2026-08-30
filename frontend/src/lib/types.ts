@@ -17,7 +17,9 @@
  * reaches the browser. Still exactly two roles.
  */
 export type Role = "admin" | "poweruser";
-export type Me = { username: string; role: Role };
+/** `age_enabled` is the deployment's tool roster: false hides the Age tool
+ *  end to end (amends section 6's Me - one config line beats a rebuild). */
+export type Me = { username: string; role: Role; age_enabled: boolean };
 
 export type LabelClass = {
   class_id: string; name: string; color: string; yolo_index: number;

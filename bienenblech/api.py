@@ -571,7 +571,8 @@ def create_app(config: Config | None = None) -> FastAPI:
         request.session["user"] = {"username": user["username"], "role": user["role"]}
         print(f"[bienenblech.alert] LOGIN user={user['username']}", flush=True)
         _notify_login(user["username"])
-        return {"username": user["username"], "role": user["role"]}
+        return {"username": user["username"], "role": user["role"],
+                "age_enabled": bool(config.tools.age)}
 
     @app.post("/api/logout")
     def logout(request: Request):
@@ -580,7 +581,10 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.get("/api/me")
     def me(user: dict = Depends(current_user)):
-        return user
+        """The session identity plus the tool roster: `age_enabled` tells the
+        SPA whether the Age tool exists at all on this deployment, so hiding a
+        tool is one config line rather than a frontend build."""
+        return {**user, "age_enabled": bool(config.tools.age)}
 
     # ------------------------------------------------------------------- users
     @app.get("/api/users", dependencies=[Depends(require_admin)])
@@ -1032,7 +1036,8 @@ def create_app(config: Config | None = None) -> FastAPI:
     # but rides its OWN store via age.py's get_age_con (modular per-tool
     # storage). Included before the SPA catch-all below for the same
     # declaration-order reason as every /api route.
-    app.include_router(age.create_router(config))
+    if config.tools.age:
+        app.include_router(age.create_router(config))
 
     # ------------------------------------------------------------------ picker
     @app.get("/api/picker/examples")

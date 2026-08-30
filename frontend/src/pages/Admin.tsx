@@ -76,6 +76,7 @@ function runTone(status: string): "accent" | "warn" | "danger" | "neutral" {
 }
 
 export default function Admin() {
+  const { ageEnabled } = useAuth();
   return (
     <div className="flex flex-col gap-8 max-w-3xl">
       <div>
@@ -88,7 +89,7 @@ export default function Admin() {
       <Classes />
       <Backup />
       <Export />
-      <AgeExport />
+      {ageEnabled ? <AgeExport /> : null}
     </div>
   );
 }

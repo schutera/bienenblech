@@ -123,6 +123,14 @@ class BackupCfg(BaseModel):
     max_upload_mb: int = 8
 
 
+class ToolsCfg(BaseModel):
+    """Per-tool visibility. `age: false` hides the Age tool end to end - the
+    router is not mounted, the frontend routes straight into Blech, the picker
+    never renders - without touching its store or its backup schedule. The
+    default keeps every existing config working unedited."""
+    age: bool = True
+
+
 class Config(BaseModel):
     project: str = "bienenblech"
     paths: PathsCfg = Field(default_factory=PathsCfg)
@@ -130,6 +138,7 @@ class Config(BaseModel):
     crop: CropCfg = Field(default_factory=CropCfg)
     auth: AuthCfg = Field(default_factory=AuthCfg)
     backup: BackupCfg = Field(default_factory=BackupCfg)
+    tools: ToolsCfg = Field(default_factory=ToolsCfg)
 
     @classmethod
     def load(cls, path: str | Path) -> "Config":

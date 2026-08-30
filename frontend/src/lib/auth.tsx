@@ -33,6 +33,7 @@ type AuthValue = {
   login: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   isAdmin: boolean;
+  ageEnabled: boolean;
 };
 
 const Ctx = createContext<AuthValue | null>(null);
@@ -84,7 +85,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<AuthValue>(
-    () => ({ me, loading, login, logout, isAdmin: me?.role === "admin" }),
+    () => ({ me, loading, login, logout, isAdmin: me?.role === "admin",
+             ageEnabled: me?.age_enabled === true }),
     [me, loading, login, logout],
   );
 

@@ -100,7 +100,7 @@ def test_login_success_returns_identity(client: TestClient):
         "/api/login", json={"username": ADMIN_USER, "password": ADMIN_PASSWORD}
     )
     assert resp.status_code == 200
-    assert resp.json() == {"username": ADMIN_USER, "role": "admin"}
+    assert resp.json() == {"username": ADMIN_USER, "role": "admin", "age_enabled": True}
 
 
 def test_login_failure_does_not_leak_whether_the_user_exists(client: TestClient):
@@ -324,7 +324,7 @@ def test_me_reports_the_poweruser_role(poweruser: TestClient):
     'annotator' would silently downgrade everyone to read-only."""
     resp = poweruser.get("/api/me")
     assert resp.status_code == 200
-    assert resp.json() == {"username": POWERUSER_USER, "role": "poweruser"}
+    assert resp.json() == {"username": POWERUSER_USER, "role": "poweruser", "age_enabled": True}
 
 
 def test_create_user_accepts_poweruser(admin: TestClient):
@@ -384,7 +384,7 @@ def test_boot_flips_stored_annotator_rows_to_poweruser(store):
             "/api/login", json={"username": "legacy_user", "password": "legacy-pw"}
         )
         assert resp.status_code == 200, resp.text
-        assert resp.json() == {"username": "legacy_user", "role": "poweruser"}
+        assert resp.json() == {"username": "legacy_user", "role": "poweruser", "age_enabled": True}
         assert c.get("/api/me").json()["role"] == "poweruser"
 
         up = c.post(
@@ -587,7 +587,7 @@ def test_a_raising_poster_still_yields_200_and_prints_no_webhook(
 
     resp = _login(client)
     assert resp.status_code == 200
-    assert resp.json() == {"username": ADMIN_USER, "role": "admin"}
+    assert resp.json() == {"username": ADMIN_USER, "role": "admin", "age_enabled": True}
     assert exploding.calls, "the poster should have been reached"
     assert client.get("/api/me").status_code == 200, "the session must survive"
 
@@ -621,3 +621,42 @@ def test_a_failed_thread_spawn_never_fails_the_login(
 
     out = capsys.readouterr().out
     assert FAKE_WEBHOOK not in out and FAKE_TOKEN not in out
+
+
+def test_disabled_age_tool_is_absent_end_to_end(tmp_path):
+    """tools.age: false (the production setting for now) must hide the tool
+    end to end: /api/me says so, and the age router is simply not mounted -
+    a hidden tool answering 404 is indistinguishable from one that does not
+    exist, which is the point. The age STORE still boots and backs up; the
+    switch is visibility, not data."""
+    from fastapi.testclient import TestClient as TC
+    from bienenblech.api import create_app
+    from bienenblech.config import BackupCfg, Config, PathsCfg, ToolsCfg
+
+    root = tmp_path / "store"
+    cfg = Config(
+        paths=PathsCfg(db_path=str(root / "main.duckdb"),
+                       age_db_path=str(root / "age.duckdb"),
+                       images_dir=str(root / "images"),
+                       cache_dir=str(root / "cache"),
+                       backups_dir=str(root / "backups")),
+        backup=BackupCfg(enabled=False),
+        tools=ToolsCfg(age=False),
+    )
+    import os
+    os.environ.pop("BIENENBLECH_DISCORD_WEBHOOK", None)
+    os.environ["BIENENBLECH_ADMIN_USER"] = "flag_admin"
+    os.environ["BIENENBLECH_ADMIN_PASSWORD"] = "flag-admin-pw"
+    try:
+        app = create_app(cfg)
+        with TC(app) as c:
+            r = c.post("/api/login", json={"username": "flag_admin", "password": "flag-admin-pw"})
+            assert r.status_code == 200 and r.json()["age_enabled"] is False
+            assert c.get("/api/me").json()["age_enabled"] is False
+            assert c.get("/api/age/stats").status_code == 404
+            assert c.get("/api/age/samples").status_code == 404
+            # the age store exists regardless - visibility, not data
+            assert (root / "age.duckdb").exists()
+    finally:
+        os.environ.pop("BIENENBLECH_ADMIN_USER", None)
+        os.environ.pop("BIENENBLECH_ADMIN_PASSWORD", None)

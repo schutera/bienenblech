@@ -34,7 +34,6 @@ import {
   Card,
   EmptyState,
   ErrorNote,
-  INPUT_CLS,
   Kbd,
   Pill,
   SectionLabel,
@@ -43,6 +42,9 @@ import {
 
 /** Mid-scale start; never recorded untouched (see the file comment). */
 const DEFAULT_DAYS = 14;
+
+/** The three flaggable defects, verbatim as stored in `flag_reason`. */
+const FLAG_REASONS = ["no bee", "fragmented segment", "something else"] as const;
 
 /** The slider's tick positions: wk0..wk4 at days 0, 7, 14, 21, 28. */
 const WEEK_MARKS = [0, 7, 14, 21, 28];
@@ -61,8 +63,9 @@ function band(days: number): string {
   return "foraging age";
 }
 
-/** Keys must not fire while the user is typing a flag reason. The range input
- *  is NOT a typing target: arrows there are handled natively, Enter is ours. */
+/** Keys must not fire while the user is typing (a class-name field elsewhere,
+ *  or any future input). The range input is NOT a typing target: arrows there
+ *  are handled natively, Enter is ours. */
 function isTypingTarget(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
   if (!el || typeof el.tagName !== "string") return false;
@@ -77,8 +80,6 @@ export default function AgeLabel() {
   const [sample, setSample] = useState<AgeSample | null>(null);
   const [ageDays, setAgeDays] = useState(DEFAULT_DAYS);
   const [touched, setTouched] = useState(false);
-  const [flagOpen, setFlagOpen] = useState(false);
-  const [reason, setReason] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [noneLeft, setNoneLeft] = useState(false);
@@ -89,8 +90,6 @@ export default function AgeLabel() {
     setNoneLeft(s === null);
     setAgeDays(DEFAULT_DAYS);
     setTouched(false);
-    setFlagOpen(false);
-    setReason("");
   }, []);
 
   useEffect(() => {
@@ -131,7 +130,7 @@ export default function AgeLabel() {
     }
   }, [sample, touched, busy, ageDays, adopt]);
 
-  const flagAndNext = useCallback(async () => {
+  const flagAndNext = useCallback(async (reason: string) => {
     if (!sample || busy) return;
     setBusy(true);
     setError(null);
@@ -143,7 +142,7 @@ export default function AgeLabel() {
     } finally {
       setBusy(false);
     }
-  }, [sample, busy, reason, adopt]);
+  }, [sample, busy, adopt]);
 
   // Arrows nudge from anywhere (native handling covers the focused slider
   // itself); Enter is Next once the slider has been touched.
@@ -308,41 +307,20 @@ export default function AgeLabel() {
           <Card className="p-4">
             <SectionLabel>Cannot be judged?</SectionLabel>
             <p className="text-[13px] text-gray-mid mt-2">
-              Blurred, more than one bee, or not a bee: flag it. Flagged samples
-              leave the queue and stay out of the export.
+              One click flags the sample and moves on. Flagged samples leave the
+              queue and stay out of the export.
             </p>
-            {flagOpen ? (
-              <div className="mt-3 flex flex-col gap-2">
-                <input
-                  className={INPUT_CLS + " w-full"}
-                  value={reason}
-                  placeholder="Reason (optional)"
-                  autoFocus
-                  onChange={(e) => setReason(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      void flagAndNext();
-                    }
-                    if (e.key === "Escape") setFlagOpen(false);
-                  }}
-                />
-                <div className="flex items-center gap-2">
-                  <Button variant="ghost" onClick={() => void flagAndNext()} disabled={busy}>
-                    {busy ? "Flagging" : "Flag and next"}
-                  </Button>
-                  <Button variant="ghost" onClick={() => setFlagOpen(false)} disabled={busy}>
-                    Cancel
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <div className="mt-3">
-                <Button variant="ghost" onClick={() => setFlagOpen(true)} disabled={busy}>
-                  Flag this sample
+            {/* Fixed reasons, no free text (owner decision): three buttons are
+                faster than typing, and fixed strings are countable - the
+                flagged list becomes a tally of what the masking pipeline gets
+                wrong instead of a pile of prose. */}
+            <div className="mt-3 flex items-center gap-2 flex-wrap">
+              {FLAG_REASONS.map((r) => (
+                <Button key={r} variant="ghost" onClick={() => void flagAndNext(r)} disabled={busy}>
+                  {r}
                 </Button>
-              </div>
-            )}
+              ))}
+            </div>
           </Card>
 
         <p className="text-[12px] text-gray-tertiary">

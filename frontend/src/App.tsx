@@ -85,7 +85,7 @@ function LegacyLabelRedirect() {
  * it, and that bar must never scroll out of view. Change one, change the other.
  */
 function Shell() {
-  const { isAdmin } = useAuth();
+  const { isAdmin, ageEnabled } = useAuth();
   const { pathname } = useLocation();
   const tool = toolOf(pathname);
   // Both Label routes are the exception to the centred column: the image under
@@ -143,14 +143,16 @@ function Shell() {
       </header>
       <main className={mainCls}>
         <Routes>
-          <Route path="/" element={<Picker />} />
+          {/* Age hidden (tools.age: false): no picker - login lands straight
+              in Blech, and stale /age links follow. */}
+          <Route path="/" element={ageEnabled ? <Picker /> : <Navigate to="/blech" replace />} />
           {/* Blech — the original tool — moved under /blech when the picker
               took /. Age is its sibling. */}
           <Route path="/blech" element={<Home />} />
           <Route path="/blech/label" element={<Label />} />
           <Route path="/blech/label/:cropId" element={<Label />} />
-          <Route path="/age" element={<AgeHome />} />
-          <Route path="/age/label" element={<AgeLabel />} />
+          <Route path="/age" element={ageEnabled ? <AgeHome /> : <Navigate to="/blech" replace />} />
+          <Route path="/age/label" element={ageEnabled ? <AgeLabel /> : <Navigate to="/blech" replace />} />
           {/* Old links stay alive: labeling moved under /blech, and the
               Images, Classes and Upload pages folded into Blech's Overview
               and Admin long ago — stale bookmarks land there, not on a 404. */}
